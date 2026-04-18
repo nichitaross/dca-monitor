@@ -1,34 +1,48 @@
 # -*- coding: utf-8 -*-
 """
-DCA Pasiv Pro — Monitor Cloud
+DCA Pasiv Pro — Monitor Cloud v2
 Rulează pe GitHub Actions la fiecare 30 min în timpul ședinței NYSE.
-Trimite notificare Telegram dacă:
-  1. Scor estimat > 70  (zona de cumpărare)
+
+CONDIȚII DE ALERTĂ:
+  1. Scor estimat > 70  (CAPE 60% + corecție 40%)
   2. CAPE Shiller < 20  (piață subevaluată/neutră)
   3. Corecție față de maxim 52W > 15%
-  4. Drop intraday > 2%  (moment semnificativ)
+  4. Drop intraday > 2%
 
-Cooldown: max 1 notificare/zi per tip (fișier .last_alert pe Actions cache).
+ÎMBUNĂTĂȚIRI v2:
+  ★ VIX — indicele fricii, cel mai predictiv semnal de cumpărare
+  ★ Fear & Greed Index (CNN) — sentiment global de piață
+  ★ Alerte pe 3 niveluri: 🟡 Atenție / 🟠 Oportunitate / 🔴 Acțiune urgentă
+  ★ Filtru de confirmare — semnal trimis doar după 2 verificări consecutive
+    (elimină zgomotul intraday și false pozitive)
 """
 
-import os, sys, json, time, datetime, requests
+import os, re, json, datetime, requests
 from pathlib import Path
 
-# ── Config ─────────────────────────────────────────────────────────────────
-TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")
-CAPE_MANUAL = float(os.environ.get("CAPE_VALUE", "0"))   # fallback manual
+# ── Config ──────────────────────────────────────────────────────────────────
+TOKEN       = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID", "")
+CAPE_MANUAL = float(os.environ.get("CAPE_VALUE", "0"))
 
 THRESHOLDS = {
-    "score_buy"       : 70,    # Scor Global > 70 → cumpărare
-    "cape_neutral"    : 20,    # CAPE < 20 → subevaluat/neutru
-    "correction_pct"  : 15.0,  # corecție față de maxim 52W
-    "intraday_drop"   : 2.0,   # drop intraday semnificativ (%)
+    "score_buy"      : 70,    # Scor > 70
+    "cape_neutral"   : 20,    # CAPE < 20
+    "correction_pct" : 15.0,  # corecție față de maxim 52W
+    "intraday_drop"  : 2.0,   # drop intraday
+    "vix_yellow"     : 20,    # VIX 20-30 → agitație
+    "vix_orange"     : 30,    # VIX 30-40 → frică
+    "vix_red"        : 40,    # VIX > 40  → panică istorică
+    "fg_fear"        : 35,    # Fear & Greed < 35 → frică
+    "fg_extreme"     : 20,    # Fear & Greed < 20 → frică extremă
 }
 
-CACHE_FILE = Path("alert_cache.json")   # păstrat între rulări prin Actions cache
+# Intervalul de confirmare: 45 min (1.5× ciclul de 30 min)
+CONFIRM_WINDOW_SEC = 45 * 60
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+CACHE_FILE = Path("alert_cache.json")
+
+# ── Cache ────────────────────────────────────────────────────────────────────
 
 def load_cache():
     if CACHE_FILE.exists():
@@ -41,39 +55,74 @@ def load_cache():
 def save_cache(cache):
     CACHE_FILE.write_text(json.dumps(cache, indent=2))
 
-def already_alerted_today(cache, key):
-    today = datetime.date.today().isoformat()
-    return cache.get(key) == today
+def alerted_today(cache, key):
+    return cache.get(f"alerted_{key}") == datetime.date.today().isoformat()
 
 def mark_alerted(cache, key):
-    cache[key] = datetime.date.today().isoformat()
+    cache[f"alerted_{key}"] = datetime.date.today().isoformat()
+    # Șterge pending după ce am alertat
+    cache.pop(f"pending_{key}", None)
+
+def is_confirmed(cache, key):
+    """
+    Filtru de confirmare: returnează True dacă semnalul a fost activ
+    și în verificarea anterioară (în fereastra de 45 min).
+    La prima declanșare marchează 'pending' și returnează False.
+    La a doua declanșare consecutivă returnează True → trimite alertă.
+    """
+    now_ts = datetime.datetime.utcnow().timestamp()
+    pending_key = f"pending_{key}"
+
+    if pending_key in cache:
+        elapsed = now_ts - cache[pending_key]
+        if elapsed <= CONFIRM_WINDOW_SEC:
+            return True   # confirmat — al doilea check consecutiv
+        else:
+            # Prea mult timp a trecut, resetăm
+            del cache[pending_key]
+
+    # Prima declanșare — marcăm pending, nu trimitem încă
+    cache[pending_key] = now_ts
+    return False
+
+# ── Telegram ─────────────────────────────────────────────────────────────────
 
 def send_telegram(msg):
     if not TOKEN or not CHAT_ID:
-        print("⚠️  TELEGRAM_TOKEN sau TELEGRAM_CHAT_ID lipsesc — mesaj ignorat.")
-        print("─── MESAJ ───")
+        print("⚠️  Secrete Telegram lipsesc — mesaj afișat local:")
         print(msg)
         return False
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     resp = requests.post(url, json={
-        "chat_id"    : CHAT_ID,
-        "text"       : msg,
-        "parse_mode" : "HTML",
+        "chat_id"   : CHAT_ID,
+        "text"      : msg,
+        "parse_mode": "HTML",
     }, timeout=10)
     ok = resp.status_code == 200
-    print("Telegram:", "✅ trimis" if ok else f"❌ eroare {resp.status_code}: {resp.text}")
+    print("Telegram:", "✅ trimis" if ok else f"❌ {resp.status_code}: {resp.text[:200]}")
     return ok
 
-# ── Date de piață ───────────────────────────────────────────────────────────
+# ── Fetch date de piață ───────────────────────────────────────────────────────
+
+def fetch_yahoo(ticker, range_="1y"):
+    """Fetch Yahoo Finance chart data pentru un ticker."""
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+           f"?interval=1d&range={range_}")
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0",
+                                   "Accept": "application/json"}, timeout=10)
+    r.raise_for_status()
+    return r.json()["chart"]["result"][0]
 
 def fetch_market_data():
-    """Returnează dict cu CAPE, S&P500 curent/maxim52W/deschidere."""
     data = {
         "cape"        : CAPE_MANUAL or None,
         "sp500_price" : None,
         "sp500_high52": None,
         "sp500_open"  : None,
-        "error"       : [],
+        "vix"         : None,
+        "fg_score"    : None,
+        "fg_rating"   : None,
+        "errors"      : [],
     }
 
     # 1. CAPE Shiller — multpl.com
@@ -81,216 +130,313 @@ def fetch_market_data():
         try:
             r = requests.get(
                 "https://api.multpl.com/shiller-pe/table/monthly",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=8,
-            )
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
             if r.status_code == 200:
-                # Caută primul număr din răspuns
-                import re
                 nums = re.findall(r'"value"\s*:\s*"?([\d.]+)"?', r.text)
                 if nums:
                     data["cape"] = float(nums[0])
         except Exception as e:
-            data["error"].append(f"CAPE fetch: {e}")
+            data["errors"].append(f"CAPE: {e}")
 
-    # 2. S&P500 — Yahoo Finance (fără bibliotecă externă)
+    # 2. S&P500
+    try:
+        res = fetch_yahoo("%5EGSPC")
+        meta   = res["meta"]
+        closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
+        data["sp500_price"]   = meta.get("regularMarketPrice") or closes[-1]
+        data["sp500_open"]    = meta.get("regularMarketOpen")  or closes[-1]
+        data["sp500_high52"]  = max(closes)
+    except Exception as e:
+        data["errors"].append(f"SP500: {e}")
+
+    # 3. VIX — indicele fricii
+    try:
+        res = fetch_yahoo("%5EVIX", range_="5d")
+        meta = res["meta"]
+        data["vix"] = meta.get("regularMarketPrice")
+        if not data["vix"]:
+            closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
+            data["vix"] = closes[-1] if closes else None
+    except Exception as e:
+        data["errors"].append(f"VIX: {e}")
+
+    # 4. Fear & Greed Index — CNN
     try:
         r = requests.get(
-            "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC"
-            "?interval=1d&range=1y",
-            headers={
-                "User-Agent"  : "Mozilla/5.0",
-                "Accept"      : "application/json",
-            },
-            timeout=10,
-        )
+            "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
+            headers={"User-Agent": "Mozilla/5.0",
+                     "Referer"   : "https://edition.cnn.com/"},
+            timeout=8)
         if r.status_code == 200:
-            js = r.json()
-            meta  = js["chart"]["result"][0]["meta"]
-            closes = js["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-            closes = [c for c in closes if c is not None]
-
-            data["sp500_price"]  = meta.get("regularMarketPrice") or closes[-1]
-            data["sp500_open"]   = meta.get("regularMarketOpen") or closes[-1]
-            data["sp500_high52"] = max(closes)
+            fg = r.json().get("fear_and_greed", {})
+            data["fg_score"]  = fg.get("score")
+            data["fg_rating"] = fg.get("rating", "")
     except Exception as e:
-        data["error"].append(f"SP500 fetch: {e}")
+        data["errors"].append(f"F&G: {e}")
 
     return data
 
-# ── Score estimat ────────────────────────────────────────────────────────────
+# ── Calcule ───────────────────────────────────────────────────────────────────
 
-def estimate_score(cape, correction_pct):
+def estimate_score(cape, correction_pct, vix, fg_score):
+    """Scor compozit 0-100: CAPE 50% + corecție 30% + VIX 10% + F&G 10%."""
+
+    # CAPE component (0-100)
+    if   cape is None : cs = 50
+    elif cape < 15    : cs = 90
+    elif cape < 20    : cs = 75
+    elif cape < 25    : cs = 55
+    elif cape < 30    : cs = 35
+    elif cape < 35    : cs = 20
+    else              : cs = 10
+
+    # Corecție component (0-100)
+    if   correction_pct is None  : rs = 45
+    elif correction_pct >= 40    : rs = 95
+    elif correction_pct >= 30    : rs = 85
+    elif correction_pct >= 20    : rs = 75
+    elif correction_pct >= 15    : rs = 65
+    elif correction_pct >= 10    : rs = 55
+    elif correction_pct >= 5     : rs = 45
+    else                         : rs = 30
+
+    # VIX component (0-100, VIX mare = oportunitate mai bună)
+    if   vix is None : vs = 50
+    elif vix >= 50   : vs = 95
+    elif vix >= 40   : vs = 85
+    elif vix >= 30   : vs = 70
+    elif vix >= 20   : vs = 50
+    else             : vs = 30
+
+    # Fear & Greed component (0-100, scor mic F&G = frică = oportunitate)
+    if   fg_score is None : fs = 50
+    elif fg_score <= 10   : fs = 95
+    elif fg_score <= 20   : fs = 85
+    elif fg_score <= 35   : fs = 70
+    elif fg_score <= 50   : fs = 50
+    elif fg_score <= 65   : fs = 35
+    else                  : fs = 20
+
+    return round(cs * 0.50 + rs * 0.30 + vs * 0.10 + fs * 0.10)
+
+def alert_level(n_triggered, vix, fg_score, correction_pct):
     """
-    Estimare simplificată a Scorului Global din DCA Pasiv Pro.
-    Folosește CAPE (60%) + Corecție (40% proxy pentru trend+risk).
+    Determină nivelul alertei pe baza numărului de condiții + severitate.
+    Returnează (emoji, label, multiplicator_DCA_recomandat)
     """
-    # CAPE score (0-100, invers proporțional cu CAPE)
-    if cape is None:
-        cape_score = 50
-    elif cape < 15:
-        cape_score = 90
-    elif cape < 20:
-        cape_score = 75
-    elif cape < 25:
-        cape_score = 50
-    elif cape < 30:
-        cape_score = 35
-    elif cape < 35:
-        cape_score = 20
+    # Condiții de severitate extremă
+    extreme = (
+        (vix and vix >= THRESHOLDS["vix_red"]) or
+        (fg_score and fg_score <= THRESHOLDS["fg_extreme"]) or
+        (correction_pct and correction_pct >= 30)
+    )
+    high = (
+        (vix and vix >= THRESHOLDS["vix_orange"]) or
+        (fg_score and fg_score <= THRESHOLDS["fg_fear"]) or
+        (correction_pct and correction_pct >= 20)
+    )
+
+    if extreme or n_triggered >= 3:
+        return "🔴", "ACȚIUNE URGENTĂ", 2.0
+    elif high or n_triggered >= 2:
+        return "🟠", "OPORTUNITATE", 1.5
     else:
-        cape_score = 10
+        return "🟡", "ATENȚIE", 1.0
 
-    # Corecție score (0-100, cu cât corecția e mai mare cu atât scorul e mai mare)
-    if correction_pct is None:
-        corr_score = 50
-    elif correction_pct >= 40:
-        corr_score = 95
-    elif correction_pct >= 30:
-        corr_score = 85
-    elif correction_pct >= 20:
-        corr_score = 75
-    elif correction_pct >= 15:
-        corr_score = 65
-    elif correction_pct >= 10:
-        corr_score = 55
-    elif correction_pct >= 5:
-        corr_score = 45
-    else:
-        corr_score = 30
+# ── Labels ────────────────────────────────────────────────────────────────────
 
-    return round(cape_score * 0.60 + corr_score * 0.40)
+CAPE_LABELS = [
+    (0,  15, "🟢 Subevaluat"),
+    (15, 20, "🟢 Neutru"),
+    (20, 25, "🟡 Ușor supraevaluat"),
+    (25, 30, "🟠 Supraevaluat"),
+    (30, 35, "🔴 Puternic supraevaluat"),
+    (35,999, "🔴 Extrem supraevaluat"),
+]
+def cape_lbl(v):
+    for lo, hi, lbl in CAPE_LABELS:
+        if lo <= v < hi: return lbl
+    return "N/A"
 
-# ── Formatare notificare ─────────────────────────────────────────────────────
+VIX_LABELS = [
+    (0,  20, "😴 Liniște"),
+    (20, 30, "😟 Agitație"),
+    (30, 40, "😨 Frică"),
+    (40, 50, "😱 Panică"),
+    (50,999, "💀 Panică istorică"),
+]
+def vix_lbl(v):
+    for lo, hi, lbl in VIX_LABELS:
+        if lo <= v < hi: return lbl
+    return "N/A"
 
-CAPE_LABELS = {
-    (0,   15): ("🟢 Subevaluat",          "Oportunitate istorică"),
-    (15,  20): ("🟢 Neutru",              "Condiții bune de cumpărare"),
-    (20,  25): ("🟡 Ușor supraevaluat",   "Cumpărare prudentă"),
-    (25,  30): ("🟠 Supraevaluat",        "DCA normal, fără accelerare"),
-    (30,  35): ("🔴 Puternic supraevaluat","Precauție"),
-    (35, 999): ("🔴 Extrem supraevaluat", "Evită lump sum"),
-}
+FG_LABELS = [
+    (0,  25, "😱 Frică extremă"),
+    (25, 45, "😨 Frică"),
+    (45, 55, "😐 Neutru"),
+    (55, 75, "😊 Lăcomie"),
+    (75,101, "🤑 Lăcomie extremă"),
+]
+def fg_lbl(v):
+    for lo, hi, lbl in FG_LABELS:
+        if lo <= v < hi: return lbl
+    return "N/A"
 
-def cape_label(v):
-    for (lo, hi), (lbl, sub) in CAPE_LABELS.items():
-        if lo <= v < hi:
-            return lbl, sub
-    return "N/A", ""
+# ── Mesaj Telegram ────────────────────────────────────────────────────────────
 
-def build_message(data, triggered, score, correction_pct, intraday_drop_pct):
-    now_ro = datetime.datetime.utcnow() + datetime.timedelta(hours=2)  # EET approx
-    ts = now_ro.strftime("%d.%m.%Y %H:%M")
+def build_message(data, triggered, score, correction_pct, intraday_pct,
+                  level_emoji, level_label, dca_mult):
+    now_ro = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    ts     = now_ro.strftime("%d.%m.%Y %H:%M")
 
     cape     = data["cape"]
+    vix      = data["vix"]
+    fg       = data["fg_score"]
     sp_price = data["sp500_price"]
-    sp_high  = data["sp500_high52"]
-
-    cape_lbl, cape_sub = cape_label(cape) if cape else ("N/A", "")
 
     lines = [
-        f"🔔 <b>DCA Pasiv Pro — Alertă</b>",
-        f"<i>{ts} (ora României)</i>",
+        f"{level_emoji} <b>DCA Pasiv Pro — {level_label}</b>",
+        f"<i>{ts} (ora României) · semnal confirmat</i>",
         "",
     ]
 
-    # Condiții îndeplinite
-    if triggered:
-        lines.append("✅ <b>Condiții îndeplinite:</b>")
-        if "score"     in triggered: lines.append(f"  • Scor estimat <b>{score}/100</b> &gt; {THRESHOLDS['score_buy']}")
-        if "cape"      in triggered: lines.append(f"  • CAPE <b>{cape:.1f}</b> &lt; {THRESHOLDS['cape_neutral']} → {cape_lbl}")
-        if "correction"in triggered: lines.append(f"  • Corecție față de maxim: <b>-{correction_pct:.1f}%</b>")
-        if "intraday"  in triggered: lines.append(f"  • Drop intraday: <b>-{intraday_drop_pct:.1f}%</b> ⚡ moment semnificativ")
-        lines.append("")
-
-    # Date piață
-    lines.append("📊 <b>Date piață:</b>")
-    if cape:
-        lines.append(f"  CAPE Shiller: <b>{cape:.1f}</b> — {cape_lbl}")
-    if sp_price:
-        lines.append(f"  S&P500: <b>${sp_price:,.0f}</b>")
-    if correction_pct is not None:
-        lines.append(f"  Corecție față de maxim 52W: <b>-{correction_pct:.1f}%</b>")
-    if intraday_drop_pct and abs(intraday_drop_pct) > 0.1:
-        sign = "-" if intraday_drop_pct > 0 else "+"
-        lines.append(f"  Mișcare intraday: <b>{sign}{abs(intraday_drop_pct):.1f}%</b>")
-    lines.append(f"  Scor estimat: <b>{score}/100</b>")
+    # Condiții declanșatoare
+    lines.append("✅ <b>Semnale active:</b>")
+    if "score"      in triggered:
+        lines.append(f"  • Scor compozit <b>{score}/100</b> &gt; {THRESHOLDS['score_buy']}")
+    if "cape"       in triggered:
+        lines.append(f"  • CAPE <b>{cape:.1f}</b> &lt; {THRESHOLDS['cape_neutral']} — {cape_lbl(cape)}")
+    if "correction" in triggered:
+        lines.append(f"  • Corecție față de maxim: <b>-{correction_pct:.1f}%</b>")
+    if "intraday"   in triggered:
+        lines.append(f"  • Drop intraday: <b>-{intraday_pct:.1f}%</b> ⚡")
+    if "vix"        in triggered:
+        lines.append(f"  • VIX <b>{vix:.1f}</b> — {vix_lbl(vix)}")
+    if "fg"         in triggered:
+        lines.append(f"  • Fear &amp; Greed: <b>{fg:.0f}/100</b> — {fg_lbl(fg)}")
     lines.append("")
 
-    # Recomandare
-    if score >= 70:
-        lines.append("💡 <b>Acțiune:</b> Verifică planul DCA — condiții de cumpărare active.")
-    elif score >= 50:
-        lines.append("💡 <b>Acțiune:</b> DCA lunar normal. Fără accelerare.")
-    else:
-        lines.append("💡 <b>Acțiune:</b> Piață scumpă. Menține DCA minim.")
+    # Tablou de bord
+    lines.append("📊 <b>Tablou de bord:</b>")
+    if cape:
+        lines.append(f"  CAPE Shiller    {cape:.1f}   {cape_lbl(cape)}")
+    if vix:
+        lines.append(f"  VIX             {vix:.1f}   {vix_lbl(vix)}")
+    if fg is not None:
+        lines.append(f"  Fear &amp; Greed    {fg:.0f}/100  {fg_lbl(fg)}")
+    if sp_price:
+        lines.append(f"  S&amp;P500          ${sp_price:,.0f}")
+    if correction_pct is not None:
+        lines.append(f"  Corecție 52W    -{correction_pct:.1f}%")
+    lines.append(f"  Scor compozit   {score}/100")
+    lines.append("")
 
-    if data["error"]:
+    # Acțiune recomandată
+    if dca_mult > 1.0:
+        lines.append(f"💡 <b>Acțiune recomandată:</b>")
+        lines.append(f"  Multiplică DCA-ul lunar cu <b>×{dca_mult:.1f}</b>")
+        if dca_mult >= 2.0:
+            lines.append(f"  ⚠️ Condiții rare — consideră și lump sum parțial")
+    else:
+        lines.append("💡 <b>Acțiune:</b> DCA normal — o singură condiție îndeplinită.")
+
+    if data["errors"]:
         lines.append("")
-        lines.append(f"⚠️ <i>Date parțiale: {'; '.join(data['error'])}</i>")
+        lines.append(f"<i>⚠️ Date parțiale: {' · '.join(data['errors'])}</i>")
 
     return "\n".join(lines)
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("=" * 50)
-    print(f"DCA Monitor — {datetime.datetime.utcnow().isoformat()} UTC")
-    print("=" * 50)
+    sep = "=" * 52
+    print(sep)
+    print(f"DCA Monitor v2 — {datetime.datetime.utcnow().isoformat()} UTC")
+    print(sep)
 
     cache = load_cache()
     data  = fetch_market_data()
-    print(f"CAPE: {data['cape']}")
-    print(f"S&P500: {data['sp500_price']} | Max52W: {data['sp500_high52']} | Open: {data['sp500_open']}")
-    if data["error"]:
-        print("Erori:", data["error"])
 
-    # Calcule
-    sp_price  = data["sp500_price"]
-    sp_high52 = data["sp500_high52"]
-    sp_open   = data["sp500_open"]
-    cape      = data["cape"]
+    # Calcule de bază
+    sp_price      = data["sp500_price"]
+    sp_high52     = data["sp500_high52"]
+    sp_open       = data["sp500_open"]
+    cape          = data["cape"]
+    vix           = data["vix"]
+    fg            = data["fg_score"]
 
-    correction_pct   = None
-    intraday_drop_pct = None
+    correction_pct = ((sp_high52 - sp_price) / sp_high52 * 100
+                      if sp_price and sp_high52 else None)
+    intraday_pct   = ((sp_open - sp_price) / sp_open * 100
+                      if sp_price and sp_open else None)
 
-    if sp_price and sp_high52 and sp_high52 > 0:
-        correction_pct = (sp_high52 - sp_price) / sp_high52 * 100
+    score = estimate_score(cape, correction_pct, vix, fg)
 
-    if sp_price and sp_open and sp_open > 0:
-        intraday_drop_pct = (sp_open - sp_price) / sp_open * 100  # pozitiv = scădere față de deschidere
+    # Log
+    print(f"CAPE:      {cape}")
+    print(f"VIX:       {vix}")
+    print(f"F&G:       {fg} ({data['fg_rating']})")
+    print(f"SP500:     {sp_price}  |  Max52W: {sp_high52}  |  Open: {sp_open}")
+    print(f"Corecție:  {f'{correction_pct:.2f}%' if correction_pct else 'N/A'}")
+    print(f"Intraday:  {f'{intraday_pct:.2f}%' if intraday_pct else 'N/A'}")
+    print(f"Scor:      {score}/100")
+    if data["errors"]:
+        print(f"Erori:     {data['errors']}")
+    print()
 
-    score = estimate_score(cape, correction_pct)
+    # ── Evaluare condiții ────────────────────────────────────────────────────
+    raw_triggered = []
 
-    print(f"Corecție față de max52W: {correction_pct:.2f}%" if correction_pct else "Corecție: N/A")
-    print(f"Drop intraday: {intraday_drop_pct:.2f}%" if intraday_drop_pct else "Intraday: N/A")
-    print(f"Scor estimat: {score}")
+    if score >= THRESHOLDS["score_buy"]:
+        raw_triggered.append("score")
+    if cape and cape < THRESHOLDS["cape_neutral"]:
+        raw_triggered.append("cape")
+    if correction_pct and correction_pct >= THRESHOLDS["correction_pct"]:
+        raw_triggered.append("correction")
+    if intraday_pct and intraday_pct >= THRESHOLDS["intraday_drop"]:
+        raw_triggered.append("intraday")
+    if vix and vix >= THRESHOLDS["vix_yellow"]:
+        raw_triggered.append("vix")
+    if fg is not None and fg <= THRESHOLDS["fg_fear"]:
+        raw_triggered.append("fg")
 
-    # Evaluare triggere
-    triggered = []
+    print(f"Semnale brute:     {raw_triggered if raw_triggered else 'niciunul'}")
 
-    if score >= THRESHOLDS["score_buy"] and not already_alerted_today(cache, "score"):
-        triggered.append("score")
+    # ── Filtru confirmare ────────────────────────────────────────────────────
+    # Semnalele intraday (zgomot) nu necesită confirmare
+    NO_CONFIRM = {"intraday"}
 
-    if cape and cape < THRESHOLDS["cape_neutral"] and not already_alerted_today(cache, "cape"):
-        triggered.append("cape")
+    confirmed = []
+    for key in raw_triggered:
+        if alerted_today(cache, key):
+            print(f"  [{key}] deja alertat azi — skip")
+            continue
+        if key in NO_CONFIRM or is_confirmed(cache, key):
+            confirmed.append(key)
+            print(f"  [{key}] ✅ confirmat")
+        else:
+            print(f"  [{key}] ⏳ pending — aștept confirmare la următoarea rulare")
 
-    if correction_pct and correction_pct >= THRESHOLDS["correction_pct"] and not already_alerted_today(cache, "correction"):
-        triggered.append("correction")
+    save_cache(cache)
 
-    if intraday_drop_pct and intraday_drop_pct >= THRESHOLDS["intraday_drop"] and not already_alerted_today(cache, "intraday"):
-        triggered.append("intraday")
+    print(f"\nSemnale confirmate: {confirmed if confirmed else 'niciunul'}")
 
-    print(f"Triggere active: {triggered if triggered else 'niciunul'}")
+    if not confirmed:
+        print("✓ Nicio alertă de trimis.")
+        return
 
-    if triggered:
-        msg = build_message(data, triggered, score, correction_pct, intraday_drop_pct)
-        if send_telegram(msg):
-            for t in triggered:
-                mark_alerted(cache, t)
-            save_cache(cache)
-    else:
-        print("✓ Nicio condiție îndeplinită azi — fără notificare.")
+    # ── Nivel alertă ─────────────────────────────────────────────────────────
+    level_emoji, level_label, dca_mult = alert_level(
+        len(confirmed), vix, fg, correction_pct)
+    print(f"Nivel: {level_emoji} {level_label}  |  DCA ×{dca_mult}")
+
+    # ── Trimite mesaj ────────────────────────────────────────────────────────
+    msg = build_message(data, confirmed, score, correction_pct, intraday_pct,
+                        level_emoji, level_label, dca_mult)
+    if send_telegram(msg):
+        for key in confirmed:
+            mark_alerted(cache, key)
+        save_cache(cache)
 
     print("Done.")
 
