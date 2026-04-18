@@ -122,16 +122,49 @@ def fetch_yahoo(ticker, range_="1y"):
         raise Exception(f"Yahoo API: result gol pentru {ticker}")
     return result[0]
 
+def fetch_fed_rate():
+    """Rata dobânzii Fed (DFEDTARU) din FRED — CSV public, fără API key."""
+    try:
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code == 200:
+            for line in reversed(r.text.strip().split("\n")):
+                parts = line.split(",")
+                if len(parts) == 2 and parts[1] not in (".", "DFEDTARU", ""):
+                    return float(parts[1])
+    except Exception as e:
+        print(f"Fed Rate: {e}")
+    return None
+
+def fetch_vwce_sma():
+    """Prețul curent VWCE.DE și dacă e deasupra SMA 200d."""
+    for ticker in ["VWCE.DE", "VWCE.L"]:
+        try:
+            res = fetch_yahoo(ticker, range_="1y")
+            closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
+            if len(closes) < 50:
+                continue
+            price  = res["meta"].get("regularMarketPrice") or closes[-1]
+            sma200 = sum(closes[-200:]) / min(len(closes), 200)
+            return round(price, 2), price > sma200, round(sma200, 2)
+        except Exception as e:
+            print(f"VWCE({ticker}): {e}")
+    return None, None, None
+
 def fetch_market_data():
     data = {
-        "cape"        : CAPE_MANUAL or None,
-        "sp500_price" : None,
-        "sp500_high52": None,
-        "sp500_open"  : None,
-        "vix"         : None,
-        "fg_score"    : None,
-        "fg_rating"   : None,
-        "errors"      : [],
+        "cape"           : CAPE_MANUAL or None,
+        "sp500_price"    : None,
+        "sp500_high52"   : None,
+        "sp500_open"     : None,
+        "vix"            : None,
+        "fg_score"       : None,
+        "fg_rating"      : None,
+        "fed_rate"       : None,
+        "vwce_price"     : None,
+        "vwce_sma200"    : None,
+        "vwce_above_sma" : None,
+        "errors"         : [],
     }
 
     # 1. CAPE Shiller — scrape pagina HTML multpl.com (API-ul lor e blocat pe GitHub)
@@ -226,6 +259,24 @@ def fetch_market_data():
                         fg_ok = True
         except Exception as e:
             data["errors"].append(f"F&G({fg_parser}): {e}")
+
+    # 5. Rata dobânzii Fed (FRED CSV — fără API key)
+    fed = fetch_fed_rate()
+    if fed is not None:
+        data["fed_rate"] = fed
+        print(f"Fed Rate: {fed}%")
+    else:
+        data["errors"].append("FedRate: fetch eșuat")
+
+    # 6. VWCE — preț curent și SMA 200d (Xetra primar, LSE fallback)
+    vwce_p, vwce_above, vwce_sma = fetch_vwce_sma()
+    data["vwce_price"]     = vwce_p
+    data["vwce_above_sma"] = vwce_above
+    data["vwce_sma200"]    = vwce_sma
+    if vwce_p is not None:
+        print(f"VWCE: {vwce_p} | SMA200: {vwce_sma} | Deasupra: {vwce_above}")
+    else:
+        data["errors"].append("VWCE: fetch eșuat")
 
     return data
 
@@ -417,8 +468,12 @@ def write_market_data(data, correction_pct, intraday_pct, score):
         "sp500_high52": data.get("sp500_high52"),
         "correction_pct": round(correction_pct, 2) if correction_pct is not None else None,
         "intraday_pct":   round(intraday_pct,   2) if intraday_pct   is not None else None,
-        "score":        score,
-        "errors":       data.get("errors", []),
+        "score":          score,
+        "fed_rate":       data.get("fed_rate"),
+        "vwce_price":     data.get("vwce_price"),
+        "vwce_sma200":    data.get("vwce_sma200"),
+        "vwce_above_sma": data.get("vwce_above_sma"),
+        "errors":         data.get("errors", []),
     }
     Path("market_data.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False)
