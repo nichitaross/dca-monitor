@@ -1,0 +1,50 @@
+name: DCA Pasiv Pro — Monitor
+
+on:
+  schedule:
+    # Fiecare 30 min în timpul ședinței NYSE: 14:00–21:00 UTC (10:00–17:00 ET)
+    # ── Ora deschiderii (14:30 UTC = 16:30 EET iarnă / 17:30 EEST vară)
+    - cron: "0,30 14-20 * * 1-5"
+  workflow_dispatch:   # permite rulare manuală din GitHub UI
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Cache pentru cooldown-ul de alerte (evită spam)
+      - name: Restore alert cache
+        uses: actions/cache@v4
+        with:
+          path: alert_cache.json
+          key: dca-alert-cache-${{ runner.os }}
+          restore-keys: |
+            dca-alert-cache-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests --quiet
+
+      - name: Run monitor
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Opțional: setează manual CAPE dacă sursa auto nu funcționează
+          # CAPE_VALUE: "34.5"
+        run: python monitor.py
+
+      # Salvează cache-ul actualizat
+      - name: Save alert cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: alert_cache.json
+          key: dca-alert-cache-${{ runner.os }}-${{ github.run_id }}
