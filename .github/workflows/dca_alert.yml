@@ -41,6 +41,17 @@ jobs:
           # CAPE_VALUE: "34.5"
         run: python monitor.py
 
+      # Publică market_data.json în repo (citit de HTML via GitHub raw)
+      - name: Commit market data
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "DCA Monitor Bot"
+          git add market_data.json
+          git diff --staged --quiet || git commit -m "chore: update market data [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # Salvează cache-ul actualizat
       - name: Save alert cache
         if: always()
