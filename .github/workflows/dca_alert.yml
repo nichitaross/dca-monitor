@@ -11,6 +11,8 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write   # necesar pentru git push market_data.json
 
     steps:
       - name: Checkout repo
