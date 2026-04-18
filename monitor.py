@@ -4,10 +4,12 @@ DCA Pasiv Pro — Monitor Cloud v2
 Rulează pe GitHub Actions la fiecare 30 min în timpul ședinței NYSE.
 
 CONDIȚII DE ALERTĂ:
-  1. Scor estimat > 70  (CAPE 60% + corecție 40%)
+  1. Scor estimat > 70  (CAPE 50% + corecție 30% + VIX 10% + F&G 10%)
   2. CAPE Shiller < 20  (piață subevaluată/neutră)
   3. Corecție față de maxim 52W > 15%
   4. Drop intraday > 2%
+  5. VIX > 20  (agitație/frică/panică)
+  6. Fear & Greed < 35  (frică pe piață)
 
 ÎMBUNĂTĂȚIRI v2:
   ★ VIX — indicele fricii, cel mai predictiv semnal de cumpărare
@@ -37,8 +39,8 @@ THRESHOLDS = {
     "fg_extreme"     : 20,    # Fear & Greed < 20 → frică extremă
 }
 
-# Intervalul de confirmare: 45 min (1.5× ciclul de 30 min)
-CONFIRM_WINDOW_SEC = 45 * 60
+# Intervalul de confirmare: 75 min (2.5× ciclul de 30 min — toleranță pentru întârzieri GitHub)
+CONFIRM_WINDOW_SEC = 75 * 60
 
 CACHE_FILE = Path("alert_cache.json")
 
@@ -55,11 +57,15 @@ def load_cache():
 def save_cache(cache):
     CACHE_FILE.write_text(json.dumps(cache, indent=2))
 
+def _today_ro():
+    """Data de azi în fusul orar România (UTC+2), nu UTC."""
+    return (datetime.datetime.utcnow() + datetime.timedelta(hours=2)).date().isoformat()
+
 def alerted_today(cache, key):
-    return cache.get(f"alerted_{key}") == datetime.date.today().isoformat()
+    return cache.get(f"alerted_{key}") == _today_ro()
 
 def mark_alerted(cache, key):
-    cache[f"alerted_{key}"] = datetime.date.today().isoformat()
+    cache[f"alerted_{key}"] = _today_ro()
     # Șterge pending după ce am alertat
     cache.pop(f"pending_{key}", None)
 
@@ -111,7 +117,10 @@ def fetch_yahoo(ticker, range_="1y"):
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0",
                                    "Accept": "application/json"}, timeout=10)
     r.raise_for_status()
-    return r.json()["chart"]["result"][0]
+    result = r.json().get("chart", {}).get("result") or []
+    if not result:
+        raise Exception(f"Yahoo API: result gol pentru {ticker}")
+    return result[0]
 
 def fetch_market_data():
     data = {
@@ -160,9 +169,9 @@ def fetch_market_data():
         res = fetch_yahoo("%5EGSPC")
         meta   = res["meta"]
         closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
-        data["sp500_price"]   = meta.get("regularMarketPrice") or closes[-1]
-        data["sp500_open"]    = meta.get("regularMarketOpen")  or closes[-1]
-        data["sp500_high52"]  = max(closes)
+        data["sp500_price"]   = meta.get("regularMarketPrice") or (closes[-1] if closes else None)
+        data["sp500_open"]    = meta.get("regularMarketOpen")  or (closes[-1] if closes else None)
+        data["sp500_high52"]  = max(closes) if closes else None
     except Exception as e:
         data["errors"].append(f"SP500: {e}")
 
@@ -280,6 +289,8 @@ def alert_level(n_triggered, vix, fg_score, correction_pct):
         (correction_pct and correction_pct >= 20)
     )
 
+    if n_triggered == 0:
+        return "⚪", "HOLD", 0.0
     if extreme or n_triggered >= 3:
         return "🔴", "ACȚIUNE URGENTĂ", 2.0
     elif high or n_triggered >= 2:
@@ -467,6 +478,12 @@ def main():
 
     if not confirmed:
         print("✓ Nicio alertă de trimis.")
+        return
+
+    # ── Verificare suficiență date ────────────────────────────────────────────
+    n_missing = sum(x is None for x in [cape, vix, fg, sp_price])
+    if n_missing >= 2:
+        print(f"⚠️  Date insuficiente ({n_missing}/4 surse lipsă) — alertă anulată pentru siguranță.")
         return
 
     # ── Nivel alertă ─────────────────────────────────────────────────────────
