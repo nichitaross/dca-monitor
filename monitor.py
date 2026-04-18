@@ -123,17 +123,36 @@ def fetch_yahoo(ticker, range_="1y"):
     return result[0]
 
 def fetch_fed_rate():
-    """Rata dobânzii Fed (DFEDTARU) din FRED — CSV public, fără API key."""
+    """
+    Rata dobânzii Fed.
+    Sursă 1: FRED CSV (oficial) — timeout scurt ca să nu blocheze
+    Sursă 2: Yahoo Finance ^IRX (Bon Trezorerie 13S ≈ rata Fed, același provider ca VWCE)
+    """
+    # Sursă 1: FRED
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
         if r.status_code == 200:
             for line in reversed(r.text.strip().split("\n")):
                 parts = line.split(",")
                 if len(parts) == 2 and parts[1] not in (".", "DFEDTARU", ""):
-                    return float(parts[1])
+                    val = float(parts[1])
+                    print(f"Fed Rate (FRED): {val}%")
+                    return val
     except Exception as e:
-        print(f"Fed Rate: {e}")
+        print(f"Fed Rate FRED: {e}")
+
+    # Sursă 2: Yahoo Finance ^IRX (Bon Trezorerie 13S — proxy excelent pentru rata Fed)
+    try:
+        res = fetch_yahoo("%5EIRX", range_="5d")
+        closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
+        if closes:
+            val = round(closes[-1], 2)
+            print(f"Fed Rate (^IRX fallback): {val}%")
+            return val
+    except Exception as e:
+        print(f"Fed Rate ^IRX: {e}")
+
     return None
 
 def fetch_vwce_sma():
@@ -568,20 +587,4 @@ def main():
         print(f"⚠️  Date insuficiente ({n_missing}/4 surse lipsă) — alertă anulată pentru siguranță.")
         return
 
-    # ── Nivel alertă ─────────────────────────────────────────────────────────
-    level_emoji, level_label, dca_mult = alert_level(
-        len(confirmed), vix, fg, correction_pct)
-    print(f"Nivel: {level_emoji} {level_label}  |  DCA ×{dca_mult}")
-
-    # ── Trimite mesaj ────────────────────────────────────────────────────────
-    msg = build_message(data, confirmed, score, correction_pct, intraday_pct,
-                        level_emoji, level_label, dca_mult)
-    if send_telegram(msg):
-        for key in confirmed:
-            mark_alerted(cache, key)
-        save_cache(cache)
-
-    print("Done.")
-
-if __name__ == "__main__":
-    main()
+ 
