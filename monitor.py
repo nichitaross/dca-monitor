@@ -125,18 +125,35 @@ def fetch_market_data():
         "errors"      : [],
     }
 
-    # 1. CAPE Shiller — multpl.com
+    # 1. CAPE Shiller — scrape pagina HTML multpl.com (API-ul lor e blocat pe GitHub)
     if not data["cape"]:
-        try:
-            r = requests.get(
-                "https://api.multpl.com/shiller-pe/table/monthly",
-                headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-            if r.status_code == 200:
-                nums = re.findall(r'"value"\s*:\s*"?([\d.]+)"?', r.text)
-                if nums:
-                    data["cape"] = float(nums[0])
-        except Exception as e:
-            data["errors"].append(f"CAPE: {e}")
+        for cape_url in [
+            "https://www.multpl.com/shiller-pe",
+            "https://www.multpl.com/",
+        ]:
+            try:
+                r = requests.get(cape_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                             "Chrome/120.0.0.0 Safari/537.36"},
+                    timeout=10)
+                if r.status_code == 200:
+                    # <div id="current">37.00</div>
+                    m = re.search(r'id=["\']current["\'][^>]*>\s*([\d.]+)', r.text)
+                    if not m:
+                        # fallback: primul număr mare (>5) lângă "Shiller"
+                        m = re.search(r'Shiller[^>]*>[\s\S]{0,200}?([\d]{2,3}\.\d{1,2})', r.text)
+                    if not m:
+                        # fallback generic: orice număr între 10 și 60
+                        nums = re.findall(r'\b([1-5]\d\.\d{1,2})\b', r.text)
+                        if nums:
+                            data["cape"] = float(nums[0])
+                            break
+                    if m:
+                        data["cape"] = float(m.group(1))
+                        break
+            except Exception as e:
+                data["errors"].append(f"CAPE({cape_url[-20:]}): {e}")
 
     # 2. S&P500
     try:
@@ -160,19 +177,46 @@ def fetch_market_data():
     except Exception as e:
         data["errors"].append(f"VIX: {e}")
 
-    # 4. Fear & Greed Index — CNN
-    try:
-        r = requests.get(
+    # 4. Fear & Greed Index
+    # Sursă primară: CNN (adesea blocat pe servere cloud)
+    # Fallback: Alternative.me — index similar, corelat cu sentimentul general
+    fg_ok = False
+    for fg_url, fg_parser in [
+        (
             "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
-            headers={"User-Agent": "Mozilla/5.0",
-                     "Referer"   : "https://edition.cnn.com/"},
-            timeout=8)
-        if r.status_code == 200:
-            fg = r.json().get("fear_and_greed", {})
-            data["fg_score"]  = fg.get("score")
-            data["fg_rating"] = fg.get("rating", "")
-    except Exception as e:
-        data["errors"].append(f"F&G: {e}")
+            "cnn"
+        ),
+        (
+            "https://api.alternative.me/fng/?limit=1&format=json",
+            "altme"
+        ),
+    ]:
+        if fg_ok:
+            break
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            if "cnn" in fg_url:
+                headers["Referer"] = "https://edition.cnn.com/"
+            r = requests.get(fg_url, headers=headers, timeout=8)
+            if r.status_code == 200:
+                js = r.json()
+                if fg_parser == "cnn":
+                    fg = js.get("fear_and_greed", {})
+                    score = fg.get("score")
+                    if score is not None:
+                        data["fg_score"]  = float(score)
+                        data["fg_rating"] = fg.get("rating", "")
+                        fg_ok = True
+                elif fg_parser == "altme":
+                    entry = js.get("data", [{}])[0]
+                    score = entry.get("value")
+                    if score is not None:
+                        data["fg_score"]  = float(score)
+                        data["fg_rating"] = entry.get("value_classification", "")
+                        # Notă: Alternative.me = crypto F&G, corelat cu sentimentul general
+                        fg_ok = True
+        except Exception as e:
+            data["errors"].append(f"F&G({fg_parser}): {e}")
 
     return data
 
