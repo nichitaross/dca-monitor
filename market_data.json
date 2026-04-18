@@ -1,0 +1,14 @@
+{
+  "updated_at": "2026-04-18T21:03:52.248256",
+  "updated_at_display": "18.04.2026 21:03 ora RO",
+  "cape": 40.44,
+  "vix": 17.48,
+  "fg_score": 26.0,
+  "fg_rating": "Fear",
+  "sp500_price": 7126.06,
+  "sp500_high52": 7126.06005859375,
+  "correction_pct": 0.0,
+  "intraday_pct": 0.0,
+  "score": 24,
+  "errors": []
+}
