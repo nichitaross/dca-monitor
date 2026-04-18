@@ -587,4 +587,20 @@ def main():
         print(f"⚠️  Date insuficiente ({n_missing}/4 surse lipsă) — alertă anulată pentru siguranță.")
         return
 
- 
+    # ── Nivel alertă ─────────────────────────────────────────────────────────
+    level_emoji, level_label, dca_mult = alert_level(
+        len(confirmed), vix, fg, correction_pct)
+    print(f"Nivel: {level_emoji} {level_label}  |  DCA ×{dca_mult}")
+
+    # ── Trimite mesaj ────────────────────────────────────────────────────────
+    msg = build_message(data, confirmed, score, correction_pct, intraday_pct,
+                        level_emoji, level_label, dca_mult)
+    if send_telegram(msg):
+        for key in confirmed:
+            mark_alerted(cache, key)
+        save_cache(cache)
+
+    print("Done.")
+
+if __name__ == "__main__":
+    main()
