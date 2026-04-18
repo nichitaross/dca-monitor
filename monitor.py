@@ -401,6 +401,30 @@ def build_message(data, triggered, score, correction_pct, intraday_pct,
 
     return "\n".join(lines)
 
+# ── Scrie market_data.json (pentru sincronizare cu aplicația HTML) ────────────
+
+def write_market_data(data, correction_pct, intraday_pct, score):
+    """Scrie market_data.json în repo — citit de aplicația HTML via GitHub raw."""
+    now_ro = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    payload = {
+        "updated_at":         now_ro.isoformat(),
+        "updated_at_display": now_ro.strftime("%d.%m.%Y %H:%M") + " ora RO",
+        "cape":         data.get("cape"),
+        "vix":          data.get("vix"),
+        "fg_score":     data.get("fg_score"),
+        "fg_rating":    data.get("fg_rating"),
+        "sp500_price":  data.get("sp500_price"),
+        "sp500_high52": data.get("sp500_high52"),
+        "correction_pct": round(correction_pct, 2) if correction_pct is not None else None,
+        "intraday_pct":   round(intraday_pct,   2) if intraday_pct   is not None else None,
+        "score":        score,
+        "errors":       data.get("errors", []),
+    }
+    Path("market_data.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False)
+    )
+    print("📄 market_data.json actualizat.")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -426,6 +450,9 @@ def main():
                       if sp_price and sp_open else None)
 
     score = estimate_score(cape, correction_pct, vix, fg)
+
+    # Scrie datele live în market_data.json (pentru HTML sync)
+    write_market_data(data, correction_pct, intraday_pct, score)
 
     # Log
     print(f"CAPE:      {cape}")
