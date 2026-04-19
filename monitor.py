@@ -31,7 +31,7 @@ CAPE_MANUAL     = float(os.environ.get("CAPE_VALUE", "0"))
 GMAIL_USER      = os.environ.get("GMAIL_USER", "")
 GMAIL_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")
 ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-EMAIL_TO        = os.environ.get("REPORT_EMAIL", "nichitaross@yahoo.com")
+EMAIL_TO        = os.environ.get("REPORT_EMAIL", "nichitasorin@gmail.com")
 MONTHLY_BUDGET  = float(os.environ.get("MONTHLY_BUDGET", "200"))
 
 THRESHOLDS = {
@@ -923,6 +923,16 @@ def main():
 
     print(f"\nSemnale confirmate: {confirmed if confirmed else 'niciunul'}")
 
+    # ── Raport lunar — rulează pe 14 sau dacă FORCE_EMAIL=true ───────────────
+    now_ro     = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    force_mail = os.environ.get("FORCE_EMAIL", "").lower() == "true"
+    if now_ro.day == 14 or force_mail:
+        reason = "FORCE_EMAIL activ" if force_mail else "azi e ziua 14"
+        print(f"\n📅 {reason} — se generează raportul lunar...")
+        send_monthly_email(data, score, correction_pct)
+    else:
+        print(f"\n📅 Ziua {now_ro.day} — raportul lunar se trimite pe 14.")
+
     if not confirmed:
         print("✓ Nicio alertă de trimis.")
         return
@@ -945,14 +955,6 @@ def main():
         for key in confirmed:
             mark_alerted(cache, key)
         save_cache(cache)
-
-    # ── Raport lunar — rulează în fiecare lună pe 14 ─────────────────────────
-    now_ro = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
-    if now_ro.day == 14:
-        print(f"\n📅 Azi e ziua 14 — se generează raportul lunar...")
-        send_monthly_email(data, score, correction_pct)
-    else:
-        print(f"\n📅 Ziua {now_ro.day} — raportul lunar se trimite pe 14.")
 
     print("Done.")
 
