@@ -135,10 +135,15 @@ def fetch_fed_rate():
         if r.status_code == 200:
             for line in reversed(r.text.strip().split("\n")):
                 parts = line.split(",")
-                if len(parts) == 2 and parts[1] not in (".", "DFEDTARU", ""):
-                    val = float(parts[1])
-                    print(f"Fed Rate (FRED): {val}%")
-                    return val
+                raw = parts[1].strip()
+                if len(parts) == 2 and raw not in (".", "DFEDTARU", ""):
+                    try:
+                        val = float(raw)
+                        if 0 < val < 30:   # sanity check: rata Fed realistă
+                            print(f"Fed Rate (FRED): {val}%")
+                            return val
+                    except ValueError:
+                        continue
     except Exception as e:
         print(f"Fed Rate FRED: {e}")
 
@@ -163,9 +168,12 @@ def fetch_vwce_sma():
             closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
             if len(closes) < 50:
                 continue
-            price  = res["meta"].get("regularMarketPrice") or closes[-1]
+            price_raw = res["meta"].get("regularMarketPrice")
+            price     = float(price_raw) if price_raw is not None else None
+            if not isinstance(price, float) or price <= 0:
+                price = float(closes[-1])
             sma200 = sum(closes[-200:]) / min(len(closes), 200)
-            return round(price, 2), price > sma200, round(sma200, 2)
+            return round(price, 2), bool(price > sma200), round(sma200, 2)
         except Exception as e:
             print(f"VWCE({ticker}): {e}")
     return None, None, None
@@ -221,9 +229,11 @@ def fetch_market_data():
         res = fetch_yahoo("%5EGSPC")
         meta   = res["meta"]
         closes = [c for c in res["indicators"]["quote"][0]["close"] if c]
-        data["sp500_price"]   = meta.get("regularMarketPrice") or (closes[-1] if closes else None)
-        data["sp500_open"]    = meta.get("regularMarketOpen")  or (closes[-1] if closes else None)
-        data["sp500_high52"]  = max(closes) if closes else None
+        data["sp500_price"]  = float(meta["regularMarketPrice"]) if meta.get("regularMarketPrice") else (closes[-1] if closes else None)
+        data["sp500_open"]   = float(meta["regularMarketOpen"])  if meta.get("regularMarketOpen")  else (closes[-1] if closes else None)
+        # fiftyTwoWeekHigh direct din meta (mai precis decât max(closes[-252:]))
+        h52 = meta.get("fiftyTwoWeekHigh")
+        data["sp500_high52"] = float(h52) if h52 else (max(closes) if closes else None)
     except Exception as e:
         data["errors"].append(f"SP500: {e}")
 
@@ -302,7 +312,17 @@ def fetch_market_data():
 # ── Calcule ───────────────────────────────────────────────────────────────────
 
 def estimate_score(cape, correction_pct, vix, fg_score):
-    """Scor compozit 0-100: CAPE 50% + corecție 30% + VIX 10% + F&G 10%."""
+    """Scor compozit 0-100: CAPE 50% + corecție 30% + VIX 10% + F&G 10%.
+    Type-safe: convertește forțat la float, returnează 50 pentru None/invalid."""
+    # Conversie sigură — previne TypeError la comparații
+    def _f(v):
+        if v is None: return None
+        try:    return float(v)
+        except: return None
+    cape           = _f(cape)
+    correction_pct = _f(correction_pct)
+    vix            = _f(vix)
+    fg_score       = _f(fg_score)
 
     # CAPE component (0-100)
     if   cape is None : cs = 50
