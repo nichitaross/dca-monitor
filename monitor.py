@@ -19,13 +19,20 @@ CONDIȚII DE ALERTĂ:
     (elimină zgomotul intraday și false pozitive)
 """
 
-import os, re, json, datetime, requests
+import os, re, json, datetime, requests, smtplib
 from pathlib import Path
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # ── Config ──────────────────────────────────────────────────────────────────
-TOKEN       = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID", "")
-CAPE_MANUAL = float(os.environ.get("CAPE_VALUE", "0"))
+TOKEN           = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID         = os.environ.get("TELEGRAM_CHAT_ID", "")
+CAPE_MANUAL     = float(os.environ.get("CAPE_VALUE", "0"))
+GMAIL_USER      = os.environ.get("GMAIL_USER", "")
+GMAIL_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")
+ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+EMAIL_TO        = os.environ.get("REPORT_EMAIL", "nichitaross@yahoo.com")
+MONTHLY_BUDGET  = float(os.environ.get("MONTHLY_BUDGET", "200"))
 
 THRESHOLDS = {
     "score_buy"      : 70,    # Scor > 70
@@ -491,6 +498,325 @@ def build_message(data, triggered, score, correction_pct, intraday_pct,
 
     return "\n".join(lines)
 
+# ── Raport lunar — alocări ETF ───────────────────────────────────────────────
+
+def get_cape_allocation(cape, vix):
+    """
+    Replica exactă a logicii din DCA_Pasiv_Pro_v4.html → recalcScore().
+    Returnează (w_vwce, w_aggh, w_eqqq, allocation_multiplier, aggh_alert).
+    """
+    c = cape or 25.0  # fallback neutru dacă CAPE lipsește
+
+    if   c < 15: w = (0.85, 0.10, 0.05); a = 2.0
+    elif c < 20: w = (0.80, 0.13, 0.07); a = 1.5
+    elif c < 25: w = (0.75, 0.17, 0.08); a = 1.0
+    elif c < 30: w = (0.72, 0.18, 0.10); a = 0.7
+    elif c < 35: w = (0.70, 0.20, 0.10); a = 0.5
+    elif c < 40: w = (0.65, 0.25, 0.10); a = 0.3
+    else:        w = (0.60, 0.30, 0.10); a = 0.3
+
+    # VIX > 30 → bonus 20% alocare (capped la 2.0)
+    if vix and vix > 30:
+        a = min(2.0, a * 1.2)
+
+    aggh_alert = (vix and vix > 30) or (c > 35)
+    return w[0], w[1], w[2], round(a, 2), aggh_alert
+
+
+# ── Raport lunar — narativă AI (Claude Sonnet) ────────────────────────────────
+
+def generate_ai_narrative(data, w_vwce, w_aggh, w_eqqq, alloc, recommended_eur, aggh_alert):
+    """Generează un paragraf narativ în română via Claude Sonnet 4."""
+    if not ANTHROPIC_KEY:
+        return ("Analiza AI nu este disponibilă. Sistemul operează pe reguli built-in CAPE + macro. "
+                "Adaugă ANTHROPIC_API_KEY în secretele GitHub pentru a activa narativa automată.")
+
+    cape     = data.get("cape") or 25
+    vix      = data.get("vix")
+    fg       = data.get("fg_score")
+    fed      = data.get("fed_rate")
+    sp500    = data.get("sp500_price")
+    above    = data.get("vwce_above_sma")
+    now_ro   = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    luna     = now_ro.strftime("%B %Y")
+
+    aggh_note = ""
+    if aggh_alert:
+        aggh_pct = round(w_aggh * 100) + 10
+        aggh_note = f"ALERTĂ: VIX sau CAPE extrem — se recomandă suplimentarea AGGH la ~{aggh_pct}%. "
+
+    prompt = f"""Ești un analist DCA pasiv care scrie rapoarte lunare concise în română.
+
+Date de piață — {luna}:
+- CAPE Shiller: {cape:.1f} ({cape_lbl(cape)})
+- VIX: {f'{vix:.1f} ({vix_lbl(vix)})' if vix else 'indisponibil'}
+- Fear & Greed: {f'{fg:.0f}/100 ({fg_lbl(fg)})' if fg else 'indisponibil'}
+- Rata Fed: {f'{fed:.2f}%' if fed else 'indisponibil'}
+- S&P 500: {f'${sp500:,.0f}' if sp500 else 'indisponibil'}
+- VWCE față de SMA200: {'DEASUPRA — trend bullish' if above else 'SUB — trend slab' if above is not None else 'indisponibil'}
+
+Recomandare calculată:
+- Alocare: {round(alloc * 100)}% din buget lunar ({recommended_eur}€)
+- Portofoliu: VWCE {round(w_vwce*100)}% · AGGH {round(w_aggh*100)}% · EQQQ {round(w_eqqq*100)}%
+{aggh_note}
+Scrie EXACT 4 propoziții în română:
+1. Evaluarea piețelor — ce spun indicatorii cheie
+2. De ce această alocare este justificată acum
+3. Principalul risc de urmărit luna viitoare
+4. Un sfat practic specific pentru investitorul DCA pasiv
+
+Fii direct și specific. Nu folosi formule generice."""
+
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 350,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        d = r.json()
+        return d["content"][0]["text"].strip()
+    except Exception as e:
+        print(f"⚠️ Claude API eroare: {e}")
+        return (f"Analiza automată indisponibilă temporar ({e}). "
+                "Recomandarea de {recommended_eur}€ a fost calculată pe baza regulilor CAPE built-in.")
+
+
+# ── Raport lunar — template HTML email ───────────────────────────────────────
+
+def build_html_email(data, narrative, w_vwce, w_aggh, w_eqqq, alloc,
+                     recommended_eur, aggh_alert, score, correction_pct):
+    """Construiește emailul HTML complet pentru raportul lunar."""
+    now_ro  = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    luna_ro = {
+        1:"Ianuarie",2:"Februarie",3:"Martie",4:"Aprilie",5:"Mai",6:"Iunie",
+        7:"Iulie",8:"August",9:"Septembrie",10:"Octombrie",11:"Noiembrie",12:"Decembrie"
+    }.get(now_ro.month, str(now_ro.month))
+    data_str = f"{luna_ro} {now_ro.year}"
+
+    cape  = data.get("cape")
+    vix   = data.get("vix")
+    fg    = data.get("fg_score")
+    fed   = data.get("fed_rate")
+    sp500 = data.get("sp500_price")
+    above = data.get("vwce_above_sma")
+
+    # Culoare recomandare bazată pe alocare
+    if alloc >= 1.5:   rec_color="#16a34a"; rec_label="BUY AGRESIV"
+    elif alloc >= 0.7: rec_color="#ca8a04"; rec_label="DCA NORMAL"
+    else:              rec_color="#dc2626"; rec_label="DEFENSIV"
+
+    # ETF sume individuale
+    vwce_eur = round(recommended_eur * w_vwce)
+    aggh_eur = round(recommended_eur * w_aggh)
+    eqqq_eur = round(recommended_eur * w_eqqq)
+
+    # AGGH alert block
+    aggh_block = ""
+    if aggh_alert:
+        aggh_target = round(w_aggh * 100) + 10
+        aggh_block = f"""
+        <tr><td style="padding:0 24px 20px;">
+          <table width="100%" cellpadding="16" style="background:#7c1d1d; border-radius:8px; border-left:4px solid #ef4444;">
+            <tr><td>
+              <div style="color:#fca5a5; font-size:13px; font-weight:bold; margin-bottom:6px;">
+                ⚠️ ALERTĂ AGGH — Condiții de piață extreme
+              </div>
+              <div style="color:#fecaca; font-size:13px; line-height:1.5;">
+                VIX ridicat sau CAPE extrem detectat. Se recomandă suplimentarea AGGH
+                de la {round(w_aggh*100)}% la <strong>~{aggh_target}%</strong> din portofoliu,
+                dacă ai capital suplimentar disponibil.
+              </div>
+            </td></tr>
+          </table>
+        </td></tr>"""
+
+    # Rând indicator helper
+    def ind_row(label, value, note=""):
+        return f"""<tr>
+          <td style="color:#94a3b8; font-size:13px; padding:8px 0; border-bottom:1px solid #1e3a5f;">{label}</td>
+          <td style="color:#e2e8f0; font-size:13px; padding:8px 0; border-bottom:1px solid #1e3a5f; text-align:right; font-weight:bold;">{value}</td>
+          <td style="color:#64748b; font-size:12px; padding:8px 0 8px 12px; border-bottom:1px solid #1e3a5f;">{note}</td>
+        </tr>"""
+
+    indicators = ""
+    if cape:
+        indicators += ind_row("CAPE Shiller", f"{cape:.1f}", cape_lbl(cape))
+    if vix:
+        indicators += ind_row("VIX", f"{vix:.1f}", vix_lbl(vix))
+    if fg is not None:
+        indicators += ind_row("Fear &amp; Greed", f"{fg:.0f}/100", fg_lbl(fg))
+    if fed:
+        indicators += ind_row("Rata Fed", f"{fed:.2f}%", "")
+    if sp500:
+        corr_str = f"-{correction_pct:.1f}% față de maxim 52W" if correction_pct else ""
+        indicators += ind_row("S&amp;P 500", f"${sp500:,.0f}", corr_str)
+    if above is not None:
+        sma_lbl = "✅ Trend bullish" if above else "⚠️ Sub SMA200"
+        indicators += ind_row("VWCE vs SMA200", sma_lbl, "")
+    indicators += ind_row("Scor compozit", f"{score}/100", "")
+
+    html = f"""<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Raport Lunar DCA — {data_str}</title>
+</head>
+<body style="margin:0; padding:0; background:#0a0f1e; font-family:Arial,Helvetica,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0f1e; padding:32px 16px;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%;">
+
+  <!-- HEADER -->
+  <tr><td style="background:linear-gradient(135deg,#0f3460,#16213e); border-radius:12px 12px 0 0; padding:32px 28px; text-align:center;">
+    <div style="font-size:11px; letter-spacing:3px; color:#00c88c; text-transform:uppercase; margin-bottom:8px;">DCA Pasiv Pro</div>
+    <div style="font-size:26px; font-weight:bold; color:#ffffff; margin-bottom:4px;">📊 Raport Lunar</div>
+    <div style="font-size:15px; color:#8892a4;">{data_str}</div>
+  </td></tr>
+
+  <!-- AI NARRATIVE -->
+  <tr><td style="background:#111827; padding:24px 28px;">
+    <div style="font-size:11px; letter-spacing:2px; color:#00c88c; text-transform:uppercase; margin-bottom:12px;">🤖 Analiză AI — Claude Sonnet 4</div>
+    <div style="background:#1e3a5f; border-left:3px solid #00c88c; border-radius:0 6px 6px 0; padding:16px 18px;">
+      <p style="color:#e2e8f0; margin:0; line-height:1.7; font-size:14px;">{narrative}</p>
+    </div>
+  </td></tr>
+
+  <!-- RECOMMENDATION -->
+  <tr><td style="background:#111827; padding:0 28px 24px;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:{rec_color}; border-radius:10px; text-align:center; padding:24px;">
+      <tr><td>
+        <div style="font-size:44px; font-weight:bold; color:#ffffff; line-height:1;">{recommended_eur}€</div>
+        <div style="font-size:13px; color:rgba(255,255,255,0.8); margin-top:6px;">
+          recomandare DCA luna aceasta · {round(alloc*100)}% din buget · <strong>{rec_label}</strong>
+        </div>
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <!-- ETF ALLOCATION -->
+  <tr><td style="background:#111827; padding:0 28px 24px;">
+    <div style="font-size:11px; letter-spacing:2px; color:#00c88c; text-transform:uppercase; margin-bottom:12px;">📦 Alocare ETF-uri</div>
+    <table width="100%" cellpadding="0" cellspacing="8">
+      <tr>
+        <td width="33%" style="text-align:center; background:#1e293b; border-radius:8px; padding:16px 8px;">
+          <div style="font-size:18px; font-weight:bold; color:#60a5fa;">{vwce_eur}€</div>
+          <div style="font-size:12px; color:#94a3b8; margin-top:4px;">VWCE</div>
+          <div style="font-size:11px; color:#64748b;">{round(w_vwce*100)}% · Global</div>
+        </td>
+        <td width="4%"></td>
+        <td width="30%" style="text-align:center; background:#1e293b; border-radius:8px; padding:16px 8px;">
+          <div style="font-size:18px; font-weight:bold; color:#34d399;">{aggh_eur}€</div>
+          <div style="font-size:12px; color:#94a3b8; margin-top:4px;">AGGH</div>
+          <div style="font-size:11px; color:#64748b;">{round(w_aggh*100)}% · Obligațiuni</div>
+        </td>
+        <td width="4%"></td>
+        <td width="29%" style="text-align:center; background:#1e293b; border-radius:8px; padding:16px 8px;">
+          <div style="font-size:18px; font-weight:bold; color:#a78bfa;">{eqqq_eur}€</div>
+          <div style="font-size:12px; color:#94a3b8; margin-top:4px;">EQQQ</div>
+          <div style="font-size:11px; color:#64748b;">{round(w_eqqq*100)}% · Tech</div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+
+  {aggh_block}
+
+  <!-- MARKET DATA -->
+  <tr><td style="background:#111827; padding:0 28px 24px;">
+    <div style="font-size:11px; letter-spacing:2px; color:#00c88c; text-transform:uppercase; margin-bottom:12px;">📈 Date de piață</div>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      {indicators}
+    </table>
+  </td></tr>
+
+  <!-- FOOTER -->
+  <tr><td style="background:#0d1117; border-radius:0 0 12px 12px; padding:20px 28px; text-align:center;">
+    <div style="font-size:11px; color:#4b5563; line-height:1.6;">
+      DCA Pasiv Pro · Raport generat automat pe 14 ale lunii via GitHub Actions<br>
+      Datele sunt informative. Aceasta nu constituie consultanță financiară.
+    </div>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
+    return html
+
+
+# ── Raport lunar — trimitere email via Resend ─────────────────────────────────
+
+def send_monthly_email(data, score, correction_pct):
+    """Orchestrează generarea și trimiterea raportului lunar."""
+    print("\n📧 RAPORT LUNAR — se pregătește trimiterea...")
+
+    cape = data.get("cape") or 25.0
+    vix  = data.get("vix")
+
+    # 1. Calculează alocările
+    w_vwce, w_aggh, w_eqqq, alloc, aggh_alert = get_cape_allocation(cape, vix)
+    recommended_eur = round(MONTHLY_BUDGET * alloc)
+    print(f"   Alocare: {round(alloc*100)}% → {recommended_eur}€")
+    print(f"   ETF: VWCE={round(w_vwce*100)}% AGGH={round(w_aggh*100)}% EQQQ={round(w_eqqq*100)}%")
+    print(f"   Alertă AGGH: {'DA' if aggh_alert else 'nu'}")
+
+    # 2. Generează narativa AI
+    print("   🤖 Se generează narativa AI...")
+    narrative = generate_ai_narrative(
+        data, w_vwce, w_aggh, w_eqqq, alloc, recommended_eur, aggh_alert)
+    print(f"   Narativă: {narrative[:80]}...")
+
+    # 3. Construiește HTML
+    html = build_html_email(
+        data, narrative, w_vwce, w_aggh, w_eqqq, alloc,
+        recommended_eur, aggh_alert, score, correction_pct)
+
+    # 4. Trimite via Gmail SMTP
+    now_ro = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    luna_ro = {
+        1:"Ianuarie",2:"Februarie",3:"Martie",4:"Aprilie",5:"Mai",6:"Iunie",
+        7:"Iulie",8:"August",9:"Septembrie",10:"Octombrie",11:"Noiembrie",12:"Decembrie"
+    }.get(now_ro.month, str(now_ro.month))
+    subject = f"📊 Raport Lunar DCA — {luna_ro} {now_ro.year}"
+
+    # Salvează HTML local (backup + debug)
+    Path("monthly_report_preview.html").write_text(html, encoding="utf-8")
+    print("   📄 Previzualizare salvată în monthly_report_preview.html")
+
+    if not GMAIL_USER or not GMAIL_PASSWORD:
+        print("⚠️  GMAIL_USER sau GMAIL_APP_PASSWORD lipsesc — emailul nu a fost trimis.")
+        print("   Adaugă secretele în GitHub → Settings → Secrets → Actions.")
+        return False
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = f"DCA Pasiv Pro <{GMAIL_USER}>"
+        msg["To"]      = EMAIL_TO
+        msg.attach(MIMEText(html, "html", "utf-8"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+            server.login(GMAIL_USER, GMAIL_PASSWORD)
+            server.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
+
+        print(f"✅ Email trimis cu succes către {EMAIL_TO}")
+        return True
+    except Exception as e:
+        print(f"❌ Eroare Gmail SMTP: {e}")
+        return False
+
+
 # ── Scrie market_data.json (pentru sincronizare cu aplicația HTML) ────────────
 
 def write_market_data(data, correction_pct, intraday_pct, score):
@@ -619,6 +945,14 @@ def main():
         for key in confirmed:
             mark_alerted(cache, key)
         save_cache(cache)
+
+    # ── Raport lunar — rulează în fiecare lună pe 14 ─────────────────────────
+    now_ro = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    if now_ro.day == 14:
+        print(f"\n📅 Azi e ziua 14 — se generează raportul lunar...")
+        send_monthly_email(data, score, correction_pct)
+    else:
+        print(f"\n📅 Ziua {now_ro.day} — raportul lunar se trimite pe 14.")
 
     print("Done.")
 
