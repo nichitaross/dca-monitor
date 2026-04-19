@@ -17,10 +17,14 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       # Cache pentru cooldown-ul de alerte (evită spam)
       - name: Restore alert cache
         uses: actions/cache@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           path: alert_cache.json
           key: dca-alert-cache-${{ runner.os }}
@@ -29,6 +33,8 @@ jobs:
 
       - name: Set up Python
         uses: actions/setup-python@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           python-version: "3.11"
 
@@ -42,8 +48,9 @@ jobs:
           GMAIL_USER:        ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          REPORT_EMAIL:      "nichitaross@yahoo.com"
+          REPORT_EMAIL:      "nichitasorin@gmail.com"
           MONTHLY_BUDGET:    "200"
+          FORCE_EMAIL:       "true"
           # Opțional: setează manual CAPE dacă sursa auto nu funcționează
           # CAPE_VALUE: "34.5"
         run: python monitor.py
@@ -63,6 +70,8 @@ jobs:
       - name: Save alert cache
         if: always()
         uses: actions/cache@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           path: alert_cache.json
           key: dca-alert-cache-${{ runner.os }}-${{ github.run_id }}
