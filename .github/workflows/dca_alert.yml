@@ -50,7 +50,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REPORT_EMAIL:      "nichitasorin@gmail.com"
           MONTHLY_BUDGET:    "200"
-          FORCE_EMAIL:       "true"
+          FORCE_EMAIL:       "false"
           # Opțional: setează manual CAPE dacă sursa auto nu funcționează
           # CAPE_VALUE: "34.5"
         run: python monitor.py
