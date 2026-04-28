@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-04-28T23:51:14.148362",
-  "updated_at_display": "28.04.2026 23:51 ora RO",
+  "updated_at": "2026-04-29T00:48:03.453951",
+  "updated_at_display": "29.04.2026 00:48 ora RO",
   "cape": 40.53,
   "vix": 17.83,
   "fg_score": 33.0,
@@ -12,7 +12,7 @@
   "score": 24,
   "fed_rate": 3.59,
   "vwce_price": 152.88,
-  "vwce_sma200": 142.95,
+  "vwce_sma200": 142.84,
   "vwce_above_sma": true,
   "errors": []
 }
