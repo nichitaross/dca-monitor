@@ -5,6 +5,7 @@ on:
     # Fiecare 30 min în timpul ședinței NYSE: 14:00–21:00 UTC (10:00–17:00 ET)
     # ── Ora deschiderii (14:30 UTC = 16:30 EET iarnă / 17:30 EEST vară)
     - cron: "0,30 14-20 * * 1-5"
+    - cron: "0 * * * *"
   workflow_dispatch:   # permite rulare manuală din GitHub UI
 
 jobs:
