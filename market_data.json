@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-04-29T10:02:24.393991",
-  "updated_at_display": "29.04.2026 10:02 ora RO",
+  "updated_at": "2026-04-29T12:48:15.300179",
+  "updated_at_display": "29.04.2026 12:48 ora RO",
   "cape": 40.53,
-  "vix": 17.98,
+  "vix": 17.91,
   "fg_score": 26.0,
   "fg_rating": "Fear",
   "sp500_price": 7138.8,
@@ -11,7 +11,7 @@
   "intraday_pct": -0.0,
   "score": 24,
   "fed_rate": 3.59,
-  "vwce_price": 153.42,
+  "vwce_price": 153.68,
   "vwce_sma200": 143.05,
   "vwce_above_sma": true,
   "errors": []
