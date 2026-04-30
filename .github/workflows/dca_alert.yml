@@ -40,7 +40,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests --quiet
+        run: pip install requests beautifulsoup4 lxml --quiet
 
       - name: Run monitor
         env:
