@@ -1,18 +1,14 @@
 {
-  "updated_at": "2026-04-30T10:06:06.104740",
-  "updated_at_display": "30.04.2026 10:06 ora RO",
-  "cape": 40.53,
-  "vix": 18.62,
-  "fg_score": 29.0,
-  "fg_rating": "Fear",
+  "updated_at": "2026-04-30T08:28:41.610635Z",
+  "updated_at_display": "2026-04-30 08:28 UTC",
+  "cape": 10.0,
+  "vix": 18.51,
   "sp500_price": 7135.95,
-  "sp500_high52": 7178.74,
   "correction_pct": 0.6,
-  "intraday_pct": 0.0,
-  "score": 24,
-  "fed_rate": 3.59,
-  "vwce_price": 153.14,
-  "vwce_sma200": 143.16,
+  "fg_rating": "",
+  "eur_ron": 5.1004,
+  "vwce_price": 153.17999267578125,
+  "vwce_sma200": 143.16159965515138,
   "vwce_above_sma": true,
-  "errors": []
+  "score": 62
 }
