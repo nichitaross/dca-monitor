@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-05-04T17:23:40.961990Z",
-  "updated_at_display": "2026-05-04 17:23 UTC",
+  "updated_at": "2026-05-04T17:28:41.473124Z",
+  "updated_at_display": "2026-05-04 17:28 UTC",
   "cape": 10.0,
-  "vix": 18.52,
-  "sp500_price": 7206.72,
+  "vix": 18.54,
+  "sp500_price": 7207.03,
   "correction_pct": 0.9,
   "fg_score": 1.0,
   "fg_rating": "Extreme Fear",
