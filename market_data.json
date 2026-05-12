@@ -1,16 +1,25 @@
 {
-  "updated_at": "2026-05-12T11:14:22.614703Z",
-  "updated_at_display": "2026-05-12 11:14 UTC",
-  "cape": 36.5,
-  "vix": 18.88,
+  "updated_at": "2026-05-12T12:07:13Z",
+  "updated_at_display": "2026-05-12 12:07 UTC",
+  "vix": 18.76,
+  "cape": 42.15,
+  "fg_score": 65.9142857142857,
+  "fg_rating": "Greed",
   "sp500_price": 7412.84,
   "correction_pct": 0.22,
-  "fg_score": 1.0,
-  "fg_rating": "Extreme Fear",
-  "fed_rate": 3.59,
-  "eur_ron": 5.2103,
-  "vwce_price": 157.83999633789062,
-  "vwce_sma200": 143.9160996246338,
+  "vwce_price": 157.76,
+  "vwce_sma200": 143.92,
   "vwce_above_sma": true,
-  "score": 32
+  "score": 22.6,
+  "intraday_pct": 0,
+  "source_status": {
+    "cape_source": "fetch_cape_multpl",
+    "fg_source": "fetch_fg_cnn",
+    "vix_source": "yahoo",
+    "sp500_source": "yahoo",
+    "vwce_source": "yahoo",
+    "fed_source": "FAILED",
+    "fed_rate_fallback": "kept_previous_value"
+  },
+  "fed_rate": 3.59
 }
