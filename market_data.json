@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-05-12T20:27:16Z",
-  "updated_at_display": "2026-05-12 20:27 UTC",
-  "vix": 18.02,
-  "cape": 42.15,
+  "updated_at": "2026-05-12T21:47:50Z",
+  "updated_at_display": "2026-05-12 21:47 UTC",
+  "vix": 17.99,
+  "cape": 42.08,
   "fg_score": 66.6,
   "fg_rating": "Greed",
   "sp500_price": 7400.96,
@@ -10,7 +10,7 @@
   "vwce_price": 156.96,
   "vwce_sma200": 144.05,
   "vwce_above_sma": true,
-  "score": 22.2,
+  "score": 22.3,
   "intraday_pct": 0,
   "source_status": {
     "cape_source": "fetch_cape_multpl",
