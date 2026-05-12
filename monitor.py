@@ -1,343 +1,431 @@
 #!/usr/bin/env python3
 """
-monitor.py v3 — colectează datele live pentru DCA Pasiv Pro v14+
-Fix-uri:
-- CAPE: BeautifulSoup + sanity check (interval 10-60) + fallback la valoarea anterioară dacă aberant
-- F&G: 3 strategii (CNN API, CNN scrape, fallback Alternative.me)
-- Fed Rate: FRED CSV + fallback HTML scrape
-- Z-score sanity check pe TOATE câmpurile
-- Păstrează valoarea anterioară dacă noul fetch e clar aberant
+update_market_data.py
+─────────────────────
+Actualizează automat market_data.json cu indicatori macro curenți:
+  - CAPE Shiller (de pe multpl.com/shillerdata.com)
+  - Fear & Greed Index (de pe CNN API)
+  - VIX (de pe Yahoo Finance)
+  - Fed Funds Rate (de pe FRED St. Louis)
+  - S&P 500 spot price (de pe Yahoo Finance)
+  - VWCE.DE price + SMA200 (de pe Yahoo Finance)
+
+Output: market_data.json în root-ul repo-ului.
+
+Rulare manuală locală:
+    python update_market_data.py
+
+Rulare în GitHub Actions:
+    Vezi .github/workflows/daily-update.yml
+
+Dependencies: requests, beautifulsoup4 (instalate de workflow YAML)
 """
 
 import json
+import os
+import sys
+import time
 import re
-import datetime as dt
-import urllib.request
-import urllib.error
-import os.path
+from datetime import datetime, timezone
+from pathlib import Path
 
-try:
-    from bs4 import BeautifulSoup
-    HAS_BS4 = True
-except ImportError:
-    HAS_BS4 = False
-    print('WARNING: BeautifulSoup not available — fallback to regex (less robust)')
+import requests
+from bs4 import BeautifulSoup
 
 
-# ── HELPER: HTTP GET cu retry + user-agent ─────────────────────────
-def http_get(url, timeout=15, headers=None):
-    req = urllib.request.Request(url, headers=headers or {
-        'User-Agent': 'Mozilla/5.0 (compatible; DCA-Pasiv-Pro/3.0)'
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode('utf-8', errors='ignore')
+# ═══════════════════════════════════════════════════════════════════
+# Configuration
+# ═══════════════════════════════════════════════════════════════════
+OUTPUT_FILE = "market_data.json"
+REQUEST_TIMEOUT = 30  # seconds
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+HEADERS = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
 
 
-# ── HELPER: încarcă valoarea anterioară din market_data.json existent ──
-def load_previous_value(field, default=None):
-    if not os.path.exists('market_data.json'):
-        return default
+def log(msg, level="INFO"):
+    """Simple logger with timestamps."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{ts}] [{level}] {msg}", flush=True)
+
+
+def safe_float(value, min_val=None, max_val=None):
+    """Parse float with range validation. Returns None if invalid."""
     try:
-        with open('market_data.json') as f:
-            data = json.load(f)
-        return data.get(field, default)
-    except Exception:
-        return default
+        f = float(value)
+        if min_val is not None and f < min_val:
+            return None
+        if max_val is not None and f > max_val:
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
 
 
-# ── HELPER: validare cu sanity range + fallback la valoare anterioară ──
-def validate_or_previous(value, field, min_v, max_v, label='value'):
-    """Returnează value dacă e în range, altfel valoarea anterioară din JSON."""
-    if value is not None and min_v <= value <= max_v:
-        return value
-    prev = load_previous_value(field)
-    if prev is not None and min_v <= prev <= max_v:
-        print(f'WARNING: {label}={value} outside [{min_v},{max_v}] — fallback la anterior {prev}')
-        return prev
-    print(f'ERROR: {label}={value} aberant și fără valoare anterioară validă')
+# ═══════════════════════════════════════════════════════════════════
+# Source 1: CAPE Shiller from multpl.com
+# ═══════════════════════════════════════════════════════════════════
+def fetch_cape():
+    """Fetch current CAPE Shiller ratio from multpl.com.
+
+    Returns float (e.g. 36.5) or None on failure.
+    """
+    url = "https://www.multpl.com/shiller-pe"
+    log(f"Fetching CAPE from {url}")
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Page structure: <div id="current"> contains "Current Shiller PE Ratio: 36.48"
+        current = soup.find(id="current")
+        if not current:
+            log("CAPE: #current div not found on multpl.com", "WARN")
+            return None
+
+        text = current.get_text(" ", strip=True)
+        # Match number with optional decimal (e.g. "36.48")
+        m = re.search(r"(\d{1,3}(?:\.\d+)?)", text)
+        if not m:
+            log(f"CAPE: no number found in '{text}'", "WARN")
+            return None
+
+        cape = safe_float(m.group(1), min_val=5, max_val=100)
+        if cape is None:
+            log(f"CAPE: value out of range: {m.group(1)}", "WARN")
+            return None
+
+        log(f"CAPE: {cape}")
+        return cape
+    except Exception as e:
+        log(f"CAPE fetch failed: {e}", "ERROR")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Source 2: Fear & Greed Index from CNN
+# ═══════════════════════════════════════════════════════════════════
+def fetch_fear_greed():
+    """Fetch CNN Fear & Greed Index.
+
+    Returns tuple (score: float, rating: str) or (None, None) on failure.
+    """
+    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    log(f"Fetching F&G from {url}")
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+
+        fg = data.get("fear_and_greed", {})
+        score = safe_float(fg.get("score"), min_val=0, max_val=100)
+        rating = fg.get("rating", "")
+
+        if score is None:
+            log("F&G: invalid score from CNN", "WARN")
+            return None, None
+
+        # Capitalize rating (e.g. "greed" → "Greed")
+        rating_clean = rating.strip().title() if rating else _classify_fg(score)
+        log(f"F&G: {score:.1f} ({rating_clean})")
+        return score, rating_clean
+    except Exception as e:
+        log(f"F&G fetch failed: {e}", "ERROR")
+        return None, None
+
+
+def _classify_fg(score):
+    """Fallback classification if CNN doesn't return a rating string."""
+    if score < 25:
+        return "Extreme Fear"
+    if score < 45:
+        return "Fear"
+    if score < 55:
+        return "Neutral"
+    if score < 75:
+        return "Greed"
+    return "Extreme Greed"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Source 3: Yahoo Finance (VIX, S&P 500, VWCE)
+# ═══════════════════════════════════════════════════════════════════
+def fetch_yahoo_quote(symbol, range_str="1mo"):
+    """Fetch Yahoo Finance quote.
+
+    Returns dict with keys: current, close_history (list of last 200 closes).
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"interval": "1d", "range": range_str}
+    log(f"Fetching Yahoo: {symbol} ({range_str})")
+    try:
+        r = requests.get(url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+
+        result = data["chart"]["result"][0]
+        meta = result["meta"]
+        quotes = result["indicators"]["quote"][0]
+        closes = [c for c in quotes.get("close", []) if c is not None]
+
+        current = meta.get("regularMarketPrice")
+        if current is None and closes:
+            current = closes[-1]
+
+        return {
+            "current": current,
+            "close_history": closes,
+            "high_52w": meta.get("fiftyTwoWeekHigh"),
+        }
+    except Exception as e:
+        log(f"Yahoo {symbol} fetch failed: {e}", "ERROR")
+        return None
+
+
+def fetch_vix():
+    """Current VIX value."""
+    q = fetch_yahoo_quote("^VIX", "1mo")
+    if q and q["current"] is not None:
+        v = safe_float(q["current"], 5, 100)
+        log(f"VIX: {v}")
+        return v
     return None
 
 
-# ── CAPE: BeautifulSoup + sanity check ───────────────────────────────
-def fetch_cape():
-    """CAPE Shiller — multpl.com cu BeautifulSoup, range valid [10, 60]."""
-    try:
-        html = http_get('https://www.multpl.com/shiller-pe', timeout=20)
+def fetch_sp500():
+    """Current S&P 500 spot + 52w high + correction pct."""
+    q = fetch_yahoo_quote("^GSPC", "1y")
+    if not q or q["current"] is None:
+        return None, None
+    price = safe_float(q["current"], 100, 20000)
+    high = safe_float(q["high_52w"], 100, 20000) if q["high_52w"] else None
 
-        if HAS_BS4:
-            soup = BeautifulSoup(html, 'html.parser')
-            # multpl.com structură: <div id="current"> ... <b>VALUE</b>
-            current = soup.find(id='current')
-            if current:
-                # Caută primul <b> sau primul număr cu format float
-                b_tag = current.find('b')
-                if b_tag:
-                    txt = b_tag.get_text(strip=True)
-                    m = re.search(r'(\d{1,2}\.\d{1,2})', txt)
-                    if m:
-                        val = float(m.group(1))
-                        return validate_or_previous(val, 'cape', 10.0, 60.0, 'CAPE multpl.com #current')
-            # Fallback: caută text "Current" în pagină
-            for el in soup.find_all(text=re.compile(r'(?i)current\s*Shiller')):
-                parent_text = el.parent.get_text(' ', strip=True) if el.parent else ''
-                m = re.search(r'(\d{2}\.\d{1,2})', parent_text)
-                if m:
-                    val = float(m.group(1))
-                    if 10 <= val <= 60:
-                        return val
+    corr = 0.0
+    if price and high and high > price:
+        corr = round((high - price) / high * 100, 2)
 
-        # Fallback regex (fără bs4) — mai strict
-        # Caută pattern "Current Shiller PE Ratio: XX.YY"
-        m = re.search(r'(?:Current\s+Shiller\s+PE\s+Ratio[:\s]*|id=["\']?current["\']?[^>]*>[^<]*<[^>]+>\s*)(\d{2}\.\d{1,2})', html, re.IGNORECASE)
-        if m:
-            val = float(m.group(1))
-            return validate_or_previous(val, 'cape', 10.0, 60.0, 'CAPE multpl.com regex')
-
-        # Fallback ultim: load anterioară
-        prev = load_previous_value('cape')
-        if prev:
-            print(f'CAPE fetch failed, folosesc anterior: {prev}')
-            return prev
-        return None
-
-    except Exception as e:
-        print(f'CAPE fetch failed: {e}')
-        return load_previous_value('cape')
+    log(f"S&P 500: {price} | 52w high: {high} | correction: {corr}%")
+    return price, corr
 
 
-# ── VIX, S&P500, VWCE — Yahoo Finance ────────────────────────────────
-def fetch_yahoo(ticker):
-    try:
-        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d'
-        data = json.loads(http_get(url))
-        result = data['chart']['result'][0]
-        return float(result['meta']['regularMarketPrice'])
-    except Exception as e:
-        print(f'Yahoo {ticker} failed: {e}')
-        return None
-
-
-def fetch_vwce_sma200():
-    try:
-        url = 'https://query1.finance.yahoo.com/v8/finance/chart/VWCE.DE?interval=1d&range=1y'
-        data = json.loads(http_get(url))
-        result = data['chart']['result'][0]
-        closes = [c for c in result['indicators']['quote'][0]['close'] if c is not None]
-        price = closes[-1]
-        sma200 = sum(closes[-200:]) / min(200, len(closes))
-        return price, sma200, price > sma200
-    except Exception as e:
-        print(f'VWCE SMA fetch failed: {e}')
+def fetch_vwce_and_sma():
+    """VWCE.DE current + 200d SMA + above_sma boolean."""
+    # Need 250 days to compute 200-day SMA reliably
+    q = fetch_yahoo_quote("VWCE.DE", "1y")
+    if not q or q["current"] is None:
+        log("VWCE: trying VWCE.MI fallback", "WARN")
+        q = fetch_yahoo_quote("VWCE.MI", "1y")
+    if not q or q["current"] is None:
         return None, None, None
 
+    price = safe_float(q["current"], 10, 1000)
+    closes = q["close_history"]
 
-# ── Fear & Greed: 3 strategii ────────────────────────────────────────
-def fetch_fear_greed():
-    """3 strategii: CNN API, CNN HTML scrape, alternative.me."""
+    sma200 = None
+    if len(closes) >= 200:
+        sma200 = round(sum(closes[-200:]) / 200, 2)
+    elif len(closes) >= 50:
+        # Fallback: use what we have (warn user)
+        sma200 = round(sum(closes) / len(closes), 2)
+        log(f"VWCE: only {len(closes)} days available, SMA approximated", "WARN")
 
-    # 1. CNN API direct (s-a schimbat probabil structura — încercăm)
-    try:
-        url = 'https://production.dataviz.cnn.io/index/fearandgreed/graphdata'
-        data = json.loads(http_get(url, headers={
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/json',
-            'Origin': 'https://edition.cnn.com',
-            'Referer': 'https://edition.cnn.com/'
-        }))
-        # Try multiple paths
-        score = None
-        rating = ''
-        if 'fear_and_greed' in data:
-            fg = data['fear_and_greed']
-            score = fg.get('score')
-            rating = fg.get('rating', '')
-        elif 'data' in data:
-            # New structure?
-            for item in data.get('data', []):
-                if 'score' in item:
-                    score = item['score']
-                    rating = item.get('rating', '')
-                    break
-        if score is not None:
-            try: score = float(score)
-            except: score = None
-        if score and 0 <= score <= 100:
-            print(f'F&G CNN API OK: {score} ({rating})')
-            return score, str(rating)
-    except Exception as e:
-        print(f'F&G CNN API failed: {e}')
-
-    # 2. CNN HTML scrape
-    try:
-        html = http_get('https://edition.cnn.com/markets/fear-and-greed', timeout=20)
-        if HAS_BS4:
-            soup = BeautifulSoup(html, 'html.parser')
-            # Caută containerul cu scor (text mare)
-            for el in soup.find_all(class_=re.compile(r'(?i)fear|greed|score|gauge')):
-                txt = el.get_text(strip=True)
-                m = re.search(r'\b(\d{1,3})\b', txt)
-                if m:
-                    val = int(m.group(1))
-                    if 0 <= val <= 100:
-                        # Caută rating-ul
-                        rating = ''
-                        for keyword in ['Extreme Fear', 'Fear', 'Neutral', 'Greed', 'Extreme Greed']:
-                            if keyword.lower() in html.lower():
-                                rating = keyword
-                                break
-                        return float(val), rating
-        # Fallback regex
-        m = re.search(r'fear[\s-]?and[\s-]?greed[^0-9]{1,500}(\d{1,3})', html, re.IGNORECASE)
-        if m:
-            val = int(m.group(1))
-            if 0 <= val <= 100:
-                return float(val), ''
-    except Exception as e:
-        print(f'F&G CNN HTML failed: {e}')
-
-    # 3. Alternative.me (crypto F&G — proxy semnificativ pentru sentiment)
-    try:
-        data = json.loads(http_get('https://api.alternative.me/fng/?limit=1'))
-        item = data['data'][0]
-        score = float(item['value'])
-        rating = item.get('value_classification', '')
-        print(f'F&G alternative.me OK: {score} ({rating}) [crypto sentiment proxy]')
-        return score, rating + ' (crypto)'
-    except Exception as e:
-        print(f'F&G alternative.me failed: {e}')
-
-    # Fallback: anterior
-    prev_score = load_previous_value('fg_score')
-    prev_rating = load_previous_value('fg_rating', '')
-    if prev_score:
-        print(f'F&G: folosesc anterior {prev_score}')
-        return prev_score, prev_rating
-    return None, ''
+    above = bool(price and sma200 and price > sma200)
+    log(f"VWCE: {price} | SMA200: {sma200} | above: {above}")
+    return price, sma200, above
 
 
-# ── Fed Rate: FRED CSV + fallback scrape ─────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# Source 4: Fed Funds Rate from FRED
+# ═══════════════════════════════════════════════════════════════════
 def fetch_fed_rate():
-    """Fed Funds Upper Target — FRED CSV cu fallback HTML scrape."""
+    """Effective Fed Funds Rate from FRED (no API key needed for HTML scrape).
 
-    # 1. FRED CSV oficial
+    Series: DFF (daily effective). We scrape the public series page.
+    """
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFF"
+    log(f"Fetching Fed Rate from FRED ({url})")
     try:
-        url = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=2024-01-01'
-        csv = http_get(url, timeout=15)
-        lines = [l for l in csv.strip().split('\n') if l and not l.upper().startswith('DATE')]
-        if lines:
-            last = lines[-1].split(',')
-            if len(last) >= 2 and last[1] not in ('.', ''):
-                val = float(last[1])
-                if -1 <= val <= 20:
-                    return val
-    except Exception as e:
-        print(f'Fed FRED CSV failed: {e}')
-
-    # 2. Fallback: scrape FRED page
-    try:
-        html = http_get('https://fred.stlouisfed.org/series/DFEDTARU', timeout=15)
-        # Caută "X.XX%" cu prefixe contextuale
-        m = re.search(r'(?:Last\s+Value|latest\s+value)[^0-9]{1,100}([\d.]+)\s*(?:%|percent)', html, re.IGNORECASE)
-        if m:
-            val = float(m.group(1))
-            if -1 <= val <= 20:
-                return val
-    except Exception as e:
-        print(f'Fed FRED scrape failed: {e}')
-
-    # 3. Anterior
-    prev = load_previous_value('fed_rate')
-    if prev:
-        print(f'Fed rate: folosesc anterior {prev}')
-        return prev
-    return None
-
-
-# ── EUR/RON din BNR ──────────────────────────────────────────────────
-def fetch_eur_ron():
-    try:
-        xml = http_get('https://www.bnr.ro/nbrfxrates.xml', timeout=10)
-        m = re.search(r'<Rate currency="EUR"[^>]*>([\d.]+)</Rate>', xml)
-        if m:
-            v = float(m.group(1))
-            if 4.5 <= v <= 7.0:
-                return v
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        lines = r.text.strip().split("\n")
+        # CSV: header line + data lines "YYYY-MM-DD,value"
+        if len(lines) < 2:
+            return None
+        # Take last non-empty line
+        for line in reversed(lines[1:]):
+            parts = line.split(",")
+            if len(parts) >= 2 and parts[1].strip() not in ("", "."):
+                rate = safe_float(parts[1], -1, 20)
+                if rate is not None:
+                    log(f"Fed Rate: {rate}%")
+                    return rate
         return None
     except Exception as e:
-        print(f'BNR EUR/RON failed: {e}')
-        return load_previous_value('eur_ron')
+        log(f"Fed Rate fetch failed: {e}", "ERROR")
+        return None
 
 
-# ── S&P 500 correction vs maxim 52W ──────────────────────────────────
-def calculate_correction_pct(sp500_current):
-    try:
-        url = 'https://query1.finance.yahoo.com/v8/finance/chart/^GSPC?interval=1d&range=1y'
-        data = json.loads(http_get(url))
-        highs = data['chart']['result'][0]['indicators']['quote'][0]['high']
-        max52w = max([h for h in highs if h is not None])
-        return round((max52w - sp500_current) / max52w * 100, 2) if max52w else 0
-    except Exception:
-        return 0
+# ═══════════════════════════════════════════════════════════════════
+# Composite score (your app's logic)
+# ═══════════════════════════════════════════════════════════════════
+def compute_score(cape, fg_score, vix, sp_correction):
+    """Compute composite 0-100 market score, mirroring app's logic.
+
+    Higher = more bullish/buy-friendly. Lower = more defensive.
+    """
+    components = []
+
+    # CAPE: lower is better (capped at 50)
+    if cape is not None:
+        cape_score = max(0, min(100, 100 - (cape / 50 * 100)))
+        components.append(("cape", cape_score, 0.40))
+
+    # F&G: contrarian — high F&G = bearish signal
+    if fg_score is not None:
+        fg_inverted = 100 - fg_score  # contrarian
+        components.append(("fg", fg_inverted, 0.20))
+
+    # VIX: higher = opportunity (fear)
+    if vix is not None:
+        vix_score = max(0, min(100, (vix / 40) * 100))
+        components.append(("vix", vix_score, 0.20))
+
+    # Correction: higher correction = better buying opportunity
+    if sp_correction is not None:
+        corr_score = max(0, min(100, (sp_correction / 30) * 100))
+        components.append(("corr", corr_score, 0.20))
+
+    if not components:
+        return None
+
+    total_weight = sum(w for _, _, w in components)
+    weighted = sum(s * w for _, s, w in components) / total_weight
+    return round(weighted, 1)
 
 
-# ── Score compus (replică recalcScore din aplicație) ─────────────────
-def calculate_market_score(cape, vix, fed_rate, sma_above):
-    if cape is None: return None
-    cape_score = max(0, min(100, round(100 - (cape / 50 * 100))))
-    trend_score = 35 if sma_above else 65
-    vix_pts = 30 if (vix is None or vix < 20) else (50 if vix < 30 else 75)
-    rate_pts = 30 if (fed_rate or 0) > 4 else (15 if (fed_rate or 0) > 2 else 5)
-    risk_score = min(100, vix_pts + rate_pts)
-    return round(cape_score * 0.6 + trend_score * 0.2 + risk_score * 0.2)
-
-
-# ── MAIN ─────────────────────────────────────────────────────────────
-def main():
-    print('=== Fetching market data v3 (robust) ===')
+# ═══════════════════════════════════════════════════════════════════
+# Main orchestrator
+# ═══════════════════════════════════════════════════════════════════
+def build_market_data():
+    """Fetch all sources and build the market_data dict."""
+    log("=" * 60)
+    log("Starting market data refresh")
+    log("=" * 60)
 
     cape = fetch_cape()
-    vix = fetch_yahoo('^VIX')
-    sp500 = fetch_yahoo('^GSPC')
     fg_score, fg_rating = fetch_fear_greed()
+    vix = fetch_vix()
+    sp500_price, sp_correction = fetch_sp500()
+    vwce_price, vwce_sma200, vwce_above_sma = fetch_vwce_and_sma()
     fed_rate = fetch_fed_rate()
-    eur_ron = fetch_eur_ron()
-    vwce_price, vwce_sma200, vwce_above_sma = fetch_vwce_sma200()
-    correction = calculate_correction_pct(sp500) if sp500 else 0
 
-    # Sanity validation finală — dacă orice valoare e aberantă, fallback la anterior
-    cape    = validate_or_previous(cape,    'cape',    10.0, 60.0, 'CAPE final')
-    vix     = validate_or_previous(vix,     'vix',     5.0, 100.0, 'VIX final')
-    eur_ron = validate_or_previous(eur_ron, 'eur_ron', 4.5, 7.0,   'EUR/RON final')
-    fed_rate= validate_or_previous(fed_rate,'fed_rate', -1.0, 20.0, 'Fed final')
+    composite_score = compute_score(cape, fg_score, vix, sp_correction)
 
-    now = dt.datetime.utcnow()
-
+    now = datetime.now(timezone.utc)
     data = {
-        'updated_at': now.isoformat() + 'Z',
-        'updated_at_display': now.strftime('%Y-%m-%d %H:%M UTC'),
-        'cape': cape,
-        'vix': vix,
-        'sp500_price': sp500,
-        'correction_pct': correction,
-        'fg_score': fg_score,
-        'fg_rating': fg_rating,
-        'fed_rate': fed_rate,
-        'eur_ron': eur_ron,
-        'vwce_price': vwce_price,
-        'vwce_sma200': vwce_sma200,
-        'vwce_above_sma': vwce_above_sma,
-        'score': calculate_market_score(cape, vix, fed_rate, vwce_above_sma)
+        "updated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at_display": now.strftime("%Y-%m-%d %H:%M UTC"),
+        "vix": vix,
+        "cape": cape,
+        "fg_score": fg_score,
+        "fg_rating": fg_rating,
+        "fed_rate": fed_rate,
+        "sp500_price": sp500_price,
+        "correction_pct": sp_correction,
+        "vwce_price": vwce_price,
+        "vwce_sma200": vwce_sma200,
+        "vwce_above_sma": vwce_above_sma,
+        "score": composite_score,
+        "intraday_pct": 0,  # placeholder, computed by app if needed
+        "source": "automated GitHub Action",
     }
 
-    # Filtrează None
-    data = {k: v for k, v in data.items() if v is not None}
-
-    with open('market_data.json', 'w') as f:
-        json.dump(data, f, indent=2)
-
-    print(f'\n=== OK: market_data.json updated ===')
-    print(json.dumps(data, indent=2))
+    # Drop None values from output (cleaner JSON)
+    data_clean = {k: v for k, v in data.items() if v is not None}
+    return data_clean
 
 
-if __name__ == '__main__':
+def load_previous():
+    """Load existing market_data.json if it exists."""
+    path = Path(OUTPUT_FILE)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def has_significant_change(old, new):
+    """Check if data changed enough to warrant a commit.
+
+    Avoid trivial commits when only timestamps change.
+    """
+    if old is None:
+        return True
+
+    fields_to_compare = [
+        "vix", "cape", "fg_score", "fed_rate",
+        "sp500_price", "vwce_price", "score"
+    ]
+    for f in fields_to_compare:
+        old_v = old.get(f)
+        new_v = new.get(f)
+        if old_v is None or new_v is None:
+            if old_v != new_v:
+                return True
+            continue
+        # Numeric comparison with 0.1% tolerance
+        try:
+            if abs(float(old_v) - float(new_v)) / max(abs(float(old_v)), 1) > 0.001:
+                return True
+        except (TypeError, ValueError):
+            if old_v != new_v:
+                return True
+    return False
+
+
+def main():
+    """Entry point."""
+    try:
+        new_data = build_market_data()
+    except Exception as e:
+        log(f"FATAL: build_market_data failed: {e}", "ERROR")
+        sys.exit(1)
+
+    # Validate minimum required fields
+    required = ["cape", "fg_score", "vix"]
+    missing = [f for f in required if f not in new_data]
+    if missing:
+        log(f"FATAL: required fields missing: {missing}", "ERROR")
+        log("Refusing to write incomplete data — keeping previous file.", "ERROR")
+        sys.exit(2)
+
+    # Compare with previous
+    old_data = load_previous()
+    if not has_significant_change(old_data, new_data):
+        log("No significant change since last run — skipping write.")
+        # Still write timestamp update so we have a heartbeat
+        if old_data:
+            old_data["updated_at"] = new_data["updated_at"]
+            old_data["updated_at_display"] = new_data["updated_at_display"]
+            Path(OUTPUT_FILE).write_text(
+                json.dumps(old_data, indent=2) + "\n", encoding="utf-8"
+            )
+            log(f"Heartbeat written to {OUTPUT_FILE}")
+        sys.exit(0)
+
+    # Write new file
+    Path(OUTPUT_FILE).write_text(
+        json.dumps(new_data, indent=2) + "\n", encoding="utf-8"
+    )
+    log(f"✓ {OUTPUT_FILE} updated successfully")
+    log("Summary:")
+    for k, v in new_data.items():
+        log(f"   {k}: {v}")
+
+
+if __name__ == "__main__":
     main()
