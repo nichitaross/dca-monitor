@@ -1,16 +1,16 @@
 {
-  "updated_at": "2026-05-12T05:59:45.135509Z",
-  "updated_at_display": "2026-05-12 05:59 UTC",
+  "updated_at": "2026-05-12T08:44:15.860818Z",
+  "updated_at_display": "2026-05-12 08:44 UTC",
   "cape": 36.5,
-  "vix": 18.38,
+  "vix": 18.86,
   "sp500_price": 7412.84,
   "correction_pct": 0.22,
   "fg_score": 1.0,
   "fg_rating": "Extreme Fear",
   "fed_rate": 3.59,
   "eur_ron": 5.2222,
-  "vwce_price": 158.13999938964844,
-  "vwce_sma200": 143.79059967041016,
+  "vwce_price": 157.8000030517578,
+  "vwce_sma200": 143.91589965820313,
   "vwce_above_sma": true,
   "score": 32
 }
