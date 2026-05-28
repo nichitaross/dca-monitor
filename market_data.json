@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-05-28T20:12:01Z",
-  "updated_at_display": "2026-05-28 20:12 UTC",
-  "vix": 15.66,
+  "updated_at": "2026-05-28T20:19:42Z",
+  "updated_at_display": "2026-05-28 20:19 UTC",
+  "vix": 15.68,
   "cape": 42.32,
-  "fg_score": 60.2857142857143,
+  "fg_score": 60.0285714285714,
   "fg_rating": "Greed",
   "sp500_price": 7563.63,
   "correction_pct": 0.07,
