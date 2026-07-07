@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-07-07T20:24:53Z",
-  "updated_at_display": "2026-07-07 20:24 UTC",
-  "vix": 16.1,
+  "updated_at": "2026-07-07T20:46:02Z",
+  "updated_at_display": "2026-07-07 20:46 UTC",
+  "vix": 16.13,
   "cape": 41.97,
-  "fg_score": 43.0285714285714,
+  "fg_score": 43.0,
   "fg_rating": "Fear",
   "sp500_price": 7503.85,
   "correction_pct": 1.54,
