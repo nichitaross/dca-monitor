@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-07-15T21:50:05Z",
-  "updated_at_display": "2026-07-15 21:50 UTC",
+  "updated_at": "2026-07-15T22:51:10Z",
+  "updated_at_display": "2026-07-15 22:51 UTC",
   "vix": 15.67,
   "cape": 42.18,
   "fg_score": 46.2857142857143,
@@ -8,7 +8,7 @@
   "sp500_price": 7572.4,
   "correction_pct": 0.64,
   "vwce_price": 165.8,
-  "vwce_sma200": 150.33,
+  "vwce_sma200": 150.2,
   "vwce_above_sma": true,
   "score": 25.3,
   "intraday_pct": 0,
