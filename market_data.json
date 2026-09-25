@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-09-25T20:53:59Z",
-  "updated_at_display": "2026-09-25 20:53 UTC",
+  "updated_at": "2026-09-25T21:44:27Z",
+  "updated_at_display": "2026-09-25 21:44 UTC",
   "vix": 14.87,
-  "cape": 41.25,
+  "cape": 41.48,
   "fg_score": 37.0,
   "fg_rating": "Fear",
   "sp500_price": 7743.41,
@@ -10,7 +10,7 @@
   "vwce_price": 169.74,
   "vwce_sma200": 156.37,
   "vwce_above_sma": true,
-  "score": 27.7,
+  "score": 27.5,
   "intraday_pct": 0,
   "source_status": {
     "cape_source": "fetch_cape_multpl",
